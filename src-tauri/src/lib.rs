@@ -683,7 +683,7 @@ mod tests {
         let markdown = temporary.path().join("note.md");
         fs::write(&markdown, "# Before").unwrap();
         let document = read_markdown(markdown.to_string_lossy().into_owned()).unwrap();
-        fs::write(&markdown, "# Changed outside LeanReader").unwrap();
+        fs::write(&markdown, "# Changed outside LiteMD").unwrap();
 
         let result = write_markdown(
             document.path,
@@ -695,7 +695,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             fs::read_to_string(&markdown).unwrap(),
-            "# Changed outside LeanReader"
+            "# Changed outside LiteMD"
         );
     }
 

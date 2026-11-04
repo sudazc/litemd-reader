@@ -1,5 +1,5 @@
 {
-  "name": "leanreader",
+  "name": "litemd",
   "version": "0.1.0",
   "description": "A lightweight local Markdown reader for Windows",
   "type": "module",

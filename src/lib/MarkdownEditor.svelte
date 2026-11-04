@@ -81,6 +81,7 @@
     darkMode: boolean;
     wordWrap: boolean;
     indentWidth: number;
+    selectionToolbarEnabled: boolean;
   };
 
   let {
@@ -97,6 +98,7 @@
     darkMode,
     wordWrap,
     indentWidth,
+    selectionToolbarEnabled,
   }: Props = $props();
   let host = $state<HTMLDivElement>();
   let shell = $state<HTMLDivElement>();
@@ -105,10 +107,13 @@
   let selectionToolbarPosition = $state<FloatingPosition | null>(null);
   let selectionToolbarBelow = $state(false);
   let editorContextMenuPosition = $state<FloatingPosition | null>(null);
+  let contextMenuAnchorTop = 8;
   let editorContextMenuError = $state("");
   let contextMenuHasSelection = $state(false);
   let contextMenuCanUndo = $state(false);
   let contextMenuCanRedo = $state(false);
+  let contextMenuOpenedByKeyboard = $state(false);
+  let contextMenuKeyboardIntent = false;
   let selectionHeadingMenuOpen = $state(false);
   let selectionHeadingMenuAbove = $state(false);
   let contextHeadingMenuOpen = $state(false);
@@ -132,12 +137,20 @@
   let searchPanelOpener:
     | ((view: import("@codemirror/view").EditorView) => boolean)
     | undefined;
+  let searchPanelCloser: (() => void) | undefined;
   let selectionComesFromSearch = false;
   let searchRequested = false;
   let pendingInsertAction: InsertAction | null = null;
 
   $effect(() => {
     applyEditorPreferences?.(wordWrap, indentWidth);
+  });
+
+  $effect(() => {
+    if (selectionToolbarEnabled) return;
+    selectionToolbarPosition = null;
+    selectionHeadingMenuOpen = false;
+    selectionHeadingMenuAbove = false;
   });
 
   function scrollProgress() {
@@ -164,7 +177,13 @@
     state: EditorState,
     isSearchSelection = selectionComesFromSearch,
   ) {
-    if (isSearchSelection || !editorView || !shell || editorContextMenuPosition) {
+    if (
+      isSearchSelection ||
+      !selectionToolbarEnabled ||
+      !editorView ||
+      !shell ||
+      editorContextMenuPosition
+    ) {
       selectionToolbarPosition = null;
       selectionToolbarBelow = false;
       selectionHeadingMenuOpen = false;
@@ -193,8 +212,8 @@
     }
 
     const bounds = shell.getBoundingClientRect();
-    const toolbarWidth = 180;
-    const toolbarHeight = 40;
+    const toolbarWidth = 186;
+    const toolbarHeight = 42;
     const centeredLeft = caret.left - bounds.left + (caret.right - caret.left) / 2 - toolbarWidth / 2;
     let left = centeredLeft;
     let top = caret.top - bounds.top - toolbarHeight - 8;
@@ -249,14 +268,37 @@
       return;
     }
 
-    const belowSpace = shell.clientHeight - selectionToolbarPosition.top - 40;
-    const aboveSpace = selectionToolbarPosition.top;
-    selectionHeadingMenuAbove = belowSpace < 76 && aboveSpace > belowSpace;
+    const belowSpace = shell.clientHeight - selectionToolbarPosition.top - 42 - 6;
+    const aboveSpace = selectionToolbarPosition.top - 6;
+    selectionHeadingMenuAbove = belowSpace < 78 && aboveSpace > belowSpace;
+  }
+
+  async function updateContextMenuPosition() {
+    await tick();
+    if (!shell || !contextMenuElement || !editorContextMenuPosition) return;
+
+    const bounds = shell.getBoundingClientRect();
+    const menuHeight = contextMenuElement.offsetHeight;
+    editorContextMenuPosition = {
+      ...editorContextMenuPosition,
+      top: Math.min(
+        Math.max(8, contextMenuAnchorTop),
+        Math.max(8, bounds.height - menuHeight - 8),
+      ),
+    };
+  }
+
+  async function toggleContextHeadingMenu() {
+    contextHeadingMenuOpen = !contextHeadingMenuOpen;
+    await updateContextMenuPosition();
   }
 
   async function handleEditorContextMenu(event: MouseEvent) {
     if (!editorView || !shell) return;
     event.preventDefault();
+    contextMenuOpenedByKeyboard =
+      contextMenuKeyboardIntent || (event.button === 0 && event.detail === 0);
+    contextMenuKeyboardIntent = false;
 
     const position = editorView.posAtCoords({ x: event.clientX, y: event.clientY });
     const currentSelection = editorView.state.selection.main;
@@ -268,6 +310,7 @@
     const bounds = shell.getBoundingClientRect();
     const menuWidth = 230;
     const menuHeight = 430;
+    contextMenuAnchorTop = event.clientY - bounds.top;
     selectionHeadingMenuOpen = false;
     selectionHeadingMenuAbove = false;
     contextHeadingMenuOpen = false;
@@ -281,23 +324,14 @@
         Math.max(8, bounds.width - menuWidth - 8),
       ),
       top: Math.min(
-        Math.max(8, event.clientY - bounds.top),
+        Math.max(8, contextMenuAnchorTop),
         Math.max(8, bounds.height - menuHeight - 8),
       ),
     };
     selectionToolbarPosition = null;
     editorView.focus();
-    await tick();
+    await updateContextMenuPosition();
     if (!editorContextMenuPosition || !contextMenuElement) return;
-    const menuHeightAfterRender = contextMenuElement?.offsetHeight || menuHeight;
-    editorContextMenuPosition = {
-      left: editorContextMenuPosition?.left ?? 8,
-      top: Math.min(
-        Math.max(8, event.clientY - bounds.top),
-        Math.max(8, bounds.height - menuHeightAfterRender - 8),
-      ),
-    };
-    await tick();
     contextMenuElement?.focus();
   }
 
@@ -316,9 +350,15 @@
   }
 
   function handleEditorPointerDown() {
+    contextMenuKeyboardIntent = false;
     selectionToolbarPosition = null;
     selectionHeadingMenuOpen = false;
     selectionHeadingMenuAbove = false;
+  }
+
+  function handleEditorKeyDown(event: KeyboardEvent) {
+    contextMenuKeyboardIntent =
+      event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey);
   }
 
   function handleEditorPointerUp() {
@@ -359,6 +399,7 @@
       if (contextHeadingMenuOpen) {
         contextHeadingMenuOpen = false;
         contextMenuElement?.focus();
+        void updateContextMenuPosition();
         return;
       }
       editorContextMenuPosition = null;
@@ -531,7 +572,7 @@
             dom.setAttribute("role", "search");
 
             const findRow = document.createElement("div");
-            findRow.className = "ml-editor-search-row";
+            findRow.className = "ml-editor-search-row ml-editor-search-primary";
             const searchInput = document.createElement("input");
             searchInput.className = "ml-editor-search-input";
             searchInput.type = "text";
@@ -588,8 +629,22 @@
               search.closeSearchPanel(searchView);
               searchView.focus();
             };
+            searchPanelCloser = closeEditorSearchPanel;
             const closeSearch = makeButton("", "关闭查找", closeEditorSearchPanel,
               "ml-editor-search-button", "close");
+            closeSearch.classList.add("ml-editor-search-close");
+
+            const navigation = document.createElement("div");
+            navigation.className = "ml-editor-search-navigation";
+            navigation.setAttribute("role", "group");
+            navigation.setAttribute("aria-label", "匹配项导航");
+            navigation.append(findPrevious, findNext);
+
+            const searchActions = document.createElement("div");
+            searchActions.className = "ml-editor-search-actions";
+            searchActions.setAttribute("role", "group");
+            searchActions.setAttribute("aria-label", "查找选项");
+            searchActions.append(replaceToggle, optionsToggle);
 
             const replaceRow = document.createElement("div");
             replaceRow.className = "ml-editor-search-row ml-editor-search-replace";
@@ -620,6 +675,10 @@
             regexp.type = "checkbox";
             const wholeWord = document.createElement("input");
             wholeWord.type = "checkbox";
+            const selectMatches = makeButton("全选匹配", "选中全部匹配项", () => {
+              search.selectMatches(searchView);
+            }, "ml-editor-search-action");
+            const matchActionButtons = [findPrevious, findNext, replaceCurrent, replaceAll, selectMatches];
             const makeOption = (label: string, input: HTMLInputElement) => {
               const wrapper = document.createElement("label");
               wrapper.className = "ml-editor-search-option";
@@ -633,9 +692,7 @@
               makeOption("区分大小写", caseSensitive),
               makeOption("正则表达式", regexp),
               makeOption("全词匹配", wholeWord),
-              makeButton("全选匹配", "选中全部匹配项", () => {
-                search.selectMatches(searchView);
-              }, "ml-editor-search-action"),
+              selectMatches,
             );
 
             function updateSearchQuery(moveToMatch = false) {
@@ -660,18 +717,35 @@
                 countFrame = undefined;
                 const state = searchView.state;
                 const query = search.getSearchQuery(state);
+                if (!query.search.trim()) {
+                  matchCount.textContent = "";
+                  matchCount.removeAttribute("title");
+                  matchActionButtons.forEach((button) => (button.disabled = true));
+                  return;
+                }
                 if (!query.valid) {
-                  matchCount.textContent = "0 条";
+                  matchCount.textContent = "正则表达式无效";
+                  matchCount.title = "请检查正则表达式语法";
+                  matchActionButtons.forEach((button) => (button.disabled = true));
                   return;
                 }
                 let total = 0;
+                let activeMatchIndex = 0;
+                const selection = state.selection.main;
                 const cursor = query.getCursor(state);
                 let match = cursor.next();
                 while (!match.done) {
                   total += 1;
+                  if (selection.from === match.value.from && selection.to === match.value.to) {
+                    activeMatchIndex = total;
+                  }
                   match = cursor.next();
                 }
-                matchCount.textContent = total ? `${total} 条` : "0 条";
+                matchActionButtons.forEach((button) => (button.disabled = total === 0));
+                matchCount.removeAttribute("title");
+                matchCount.textContent = total
+                  ? `${activeMatchIndex || 1} / ${total}`
+                  : "无匹配结果";
               });
             }
 
@@ -691,16 +765,8 @@
               }
             });
 
-            findRow.append(
-              searchInput,
-              matchCount,
-              findPrevious,
-              findNext,
-              replaceToggle,
-              optionsToggle,
-              closeSearch,
-            );
-            dom.append(findRow, replaceRow, optionsRow);
+            findRow.append(searchInput, matchCount, navigation, closeSearch);
+            dom.append(findRow, searchActions, replaceRow, optionsRow);
 
             return {
               dom,
@@ -816,6 +882,7 @@
         });
         editorView.dom.addEventListener("pointerdown", handleEditorPointerDown);
         editorView.dom.addEventListener("pointerup", handleEditorPointerUp);
+        editorView.dom.addEventListener("keydown", handleEditorKeyDown);
         editorView.dom.addEventListener("keyup", handleEditorKeyUp);
         editorView.dom.addEventListener("contextmenu", handleEditorContextMenu);
         editorView.dom.addEventListener("focusout", handleEditorFocusOut);
@@ -878,6 +945,7 @@
         editorResizeObserver = undefined;
         editorView.dom.removeEventListener("pointerdown", handleEditorPointerDown);
         editorView.dom.removeEventListener("pointerup", handleEditorPointerUp);
+        editorView.dom.removeEventListener("keydown", handleEditorKeyDown);
         editorView.dom.removeEventListener("keyup", handleEditorKeyUp);
         editorView.dom.removeEventListener("contextmenu", handleEditorContextMenu);
         editorView.dom.removeEventListener("focusout", handleEditorFocusOut);
@@ -890,6 +958,7 @@
       searchRequested = false;
       pendingInsertAction = null;
       searchPanelOpener = undefined;
+      searchPanelCloser = undefined;
       historyCommands = undefined;
       selectionToolbarPosition = null;
       editorContextMenuPosition = null;
@@ -1007,6 +1076,20 @@
     searchPanelOpener(editorView);
   }
 
+  export function closeSearch() {
+    searchRequested = false;
+    if (!editorView?.dom.querySelector(".ml-editor-search-panel")) return;
+    searchPanelCloser?.();
+  }
+
+  export function toggleSearch() {
+    if (searchRequested || editorView?.dom.querySelector(".ml-editor-search-panel")) {
+      closeSearch();
+    } else {
+      openSearch();
+    }
+  }
+
   export function insertMarkdown(action: InsertAction) {
     if (!editorView) {
       pendingInsertAction = action;
@@ -1035,7 +1118,7 @@
         aria-label="文字格式"
         tabindex="-1"
         style={`left:${selectionToolbarPosition.left}px;top:${selectionToolbarPosition.top}px`}
-        in:popupTransition={{ duration: 125, start: 0.98 }}
+        in:popupTransition={{ duration: 140 }}
         onpointerdown={(event) => event.preventDefault()}
       >
         <button type="button" aria-label="粗体" title="粗体" onclick={() => applyMarkdownInsertion("bold")}>
@@ -1070,7 +1153,7 @@
               class:above={selectionHeadingMenuAbove}
               role="group"
               aria-label="标题级别"
-              transition:popupTransition={{ duration: 125, start: 0.98 }}
+              transition:popupTransition={{ duration: 140 }}
             >
               {#each headingLevels as level}
                 <button
@@ -1088,12 +1171,13 @@
     {#if editorContextMenuPosition}
       <div
         class="editor-context-menu"
+        class:keyboard-opened={contextMenuOpenedByKeyboard}
         bind:this={contextMenuElement}
         role="menu"
         aria-label="编辑操作"
         tabindex="-1"
         style={`left:${editorContextMenuPosition.left}px;top:${editorContextMenuPosition.top}px`}
-        transition:popupTransition={{ duration: 150, start: 0.97 }}
+        transition:popupTransition={{ duration: 150 }}
         onkeydown={handleContextMenuKeydown}
       >
         <button type="button" role="menuitem" disabled={!contextMenuCanUndo} onclick={() => runHistoryCommand("undo")}>
@@ -1129,7 +1213,7 @@
             aria-haspopup="true"
             aria-expanded={contextHeadingMenuOpen}
             aria-controls="context-heading-options"
-            onclick={() => (contextHeadingMenuOpen = !contextHeadingMenuOpen)}
+            onclick={toggleContextHeadingMenu}
           >
             <Heading1 size={16} /><span>标题</span>
             {#if contextHeadingMenuOpen}<ChevronDown size={15} />{:else}<ChevronRight size={15} />{/if}
@@ -1140,7 +1224,8 @@
               class="context-heading-options"
               role="group"
               aria-label="标题级别"
-              transition:popupTransition={{ duration: 125, start: 0.98 }}
+              transition:popupTransition={{ duration: 140 }}
+              onoutroend={() => void updateContextMenuPosition()}
             >
               {#each headingLevels as level}
                 <button
@@ -1199,18 +1284,21 @@
   .selection-toolbar,
   .editor-context-menu {
     position: absolute;
-    z-index: 6;
+    z-index: 30;
     border: 1px solid var(--line-strong);
     border-radius: var(--radius-popover);
     color: var(--text);
     background: var(--surface);
-    box-shadow: var(--shadow);
+    box-shadow: var(--shadow-popover, var(--shadow));
   }
 
   .selection-toolbar {
     display: flex;
     align-items: center;
-    gap: 2px;
+    gap: 4px;
+    width: 186px;
+    height: 42px;
+    box-sizing: border-box;
     padding: 4px;
     transform-origin: bottom center;
   }
@@ -1240,9 +1328,20 @@
   }
 
   .selection-toolbar button:hover,
-  .editor-context-menu button:hover {
+  .editor-context-menu button:hover:not(:disabled),
+  .editor-context-menu button:focus-visible:not(:disabled) {
     color: var(--text);
     background: var(--hover);
+  }
+
+  .editor-context-menu button[aria-expanded="true"]:not(:disabled) {
+    color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  .selection-toolbar .selection-heading-trigger[aria-expanded="true"] {
+    color: var(--accent);
+    background: var(--accent-soft);
   }
 
   .selection-heading-control {
@@ -1256,38 +1355,56 @@
     gap: 0;
   }
 
+  .selection-toolbar button,
+  .editor-context-menu button,
+  :global(.editor-shell .editor-host .ml-editor-search-button),
+  :global(.editor-shell .editor-host .ml-editor-search-toggle),
+  :global(.editor-shell .editor-host .ml-editor-search-action) {
+    transition:
+      color var(--duration-interaction, 100ms) var(--ease-out, ease-out),
+      background-color var(--duration-interaction, 100ms) var(--ease-out, ease-out),
+      border-color var(--duration-interaction, 100ms) var(--ease-out, ease-out),
+      box-shadow var(--duration-interaction, 100ms) var(--ease-out, ease-out),
+      transform var(--duration-press-out, 150ms) var(--ease-out, ease-out);
+  }
+
+  .selection-toolbar .selection-heading-trigger[aria-expanded="true"],
+  .editor-context-menu button[aria-expanded="true"]:not(:disabled),
+  :global(.editor-shell .editor-host .ml-editor-search-toggle[aria-expanded="true"]:not(:disabled)) {
+    --button-pressed-bg: var(--accent-soft);
+  }
+
   .selection-heading-options {
     position: absolute;
     top: calc(100% + 6px);
-    left: 0;
+    right: 0;
     z-index: 7;
     display: grid;
     grid-template-columns: repeat(3, 32px);
-    gap: 2px;
+    gap: 4px;
     padding: 4px;
-    border: 1px solid var(--line-strong);
+    border: 1px solid var(--line);
     border-radius: var(--radius-popover);
     background: var(--surface);
-    box-shadow: var(--shadow);
-    transform-origin: top left;
+    box-shadow: var(--shadow-popover, var(--shadow));
+    transform-origin: top right;
   }
 
   .selection-heading-options.above {
     top: auto;
     bottom: calc(100% + 6px);
-    transform-origin: bottom left;
+    transform-origin: bottom right;
   }
 
   .selection-toolbar .selection-heading-options button {
     width: 32px;
-    height: 30px;
+    height: 32px;
     font-size: 15px;
     font-weight: 650;
   }
 
   .editor-context-menu button:disabled {
-    color: var(--subtle);
-    opacity: 0.6;
+    color: var(--disabled);
     cursor: default;
   }
 
@@ -1298,11 +1415,13 @@
   .editor-context-menu {
     display: flex;
     flex-direction: column;
+    gap: 0;
     width: 230px;
     max-height: calc(100% - 16px);
     box-sizing: border-box;
     overflow: auto;
-    padding: 5px;
+    padding: 6px;
+    border-color: var(--line);
     transform-origin: top left;
   }
 
@@ -1311,8 +1430,8 @@
     align-items: center;
     flex: 0 0 auto;
     width: 100%;
-    min-height: 36px;
-    gap: 10px;
+    min-height: 32px;
+    gap: 9px;
     padding: 0 9px;
     border: 0;
     border-radius: var(--radius-control);
@@ -1328,16 +1447,21 @@
     flex: 1;
   }
 
+  .editor-context-menu button :global(svg) {
+    color: var(--muted);
+  }
+
   .context-heading-control {
     display: flex;
     flex: 0 0 auto;
     flex-direction: column;
+    gap: 2px;
   }
 
   .context-heading-options {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 2px;
+    gap: 4px;
     margin: 0 5px 4px 34px;
     padding: 3px;
     border-radius: var(--radius-control);
@@ -1347,16 +1471,20 @@
   .editor-context-menu .context-heading-options button {
     justify-content: center;
     width: auto;
-    min-height: 30px;
+    min-height: 32px;
     padding: 0;
     font-size: 15px;
     font-weight: 650;
   }
 
   .editor-context-menu kbd {
-    color: var(--muted);
+    color: var(--subtle);
     font: inherit;
-    font-size: 15px;
+    font-size: 14px;
+  }
+
+  .editor-context-menu button:disabled kbd {
+    color: var(--disabled);
   }
 
   .context-menu-error {
@@ -1369,12 +1497,21 @@
   .context-menu-divider {
     flex: 0 0 auto;
     height: 1px;
-    margin: 4px 6px;
+    margin: 5px 3px;
     background: var(--line);
   }
 
-  .selection-toolbar button:focus-visible,
+  .selection-toolbar button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
   .editor-context-menu button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  .editor-context-menu.keyboard-opened:focus {
     outline: 2px solid var(--accent);
     outline-offset: -2px;
   }
@@ -1396,12 +1533,12 @@
 
   :global(.editor-host .cm-scroller) {
     overflow: auto;
-    font-family: Consolas, "Cascadia Code", "Microsoft YaHei UI", monospace;
+    font-family: "Cascadia Code", Consolas, "Microsoft YaHei UI", monospace;
     line-height: 1.65;
   }
 
   :global(.editor-host .cm-content) {
-    padding: 28px 36px 80px;
+    padding: 20px 20px 80px;
     caret-color: var(--accent);
   }
 
@@ -1430,13 +1567,13 @@
   }
 
   :global(.editor-shell .editor-host .cm-panels) {
-    position: fixed;
-    top: calc(var(--titlebar-height) + var(--toolbar-height) + 6px);
-    right: var(--toolbar-inline-padding, 18px);
+    position: absolute;
+    top: 0;
+    right: 0;
     bottom: auto;
-    left: auto;
+    left: 0;
     z-index: 30;
-    width: 0;
+    width: auto;
     height: 0;
     max-width: none;
     overflow: visible;
@@ -1446,29 +1583,61 @@
   }
 
   :global(.editor-shell .editor-host .ml-editor-search-panel) {
-    position: fixed;
-    top: calc(var(--titlebar-height) + var(--toolbar-height) + 6px);
-    right: var(--toolbar-inline-padding, 18px);
-    z-index: 30;
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 1;
+    container-type: inline-size;
     display: flex;
     flex-direction: column;
-    gap: 7px;
-    width: min(470px, calc(100vw - 24px));
-    padding: 8px;
+    width: min(520px, calc(100% - 16px));
+    padding: 5px 8px;
     box-sizing: border-box;
-    border: 1px solid var(--line-strong);
-    border-radius: var(--radius-popover);
+    border: 1px solid var(--line);
+    border-radius: 10px;
     color: var(--text);
     background: var(--surface);
-    box-shadow: var(--shadow);
+    box-shadow: var(--shadow-popover, var(--shadow));
     pointer-events: auto;
   }
 
   :global(.editor-shell .editor-host .ml-editor-search-row) {
     display: flex;
+    flex-wrap: nowrap;
     align-items: center;
     gap: 6px;
     min-width: 0;
+  }
+
+  @container (max-width: 280px) {
+    :global(.editor-shell .editor-host .ml-editor-search-primary) {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      grid-template-areas:
+        "input input close"
+        "count navigation navigation";
+      gap: 4px 6px;
+    }
+
+    :global(.editor-shell .editor-host .ml-editor-search-primary .ml-editor-search-input) {
+      grid-area: input;
+      width: 100%;
+      min-width: 0;
+    }
+
+    :global(.editor-shell .editor-host .ml-editor-search-primary .ml-editor-search-count) {
+      grid-area: count;
+      justify-self: start;
+    }
+
+    :global(.editor-shell .editor-host .ml-editor-search-primary .ml-editor-search-navigation) {
+      grid-area: navigation;
+    }
+
+    :global(.editor-shell .editor-host .ml-editor-search-primary .ml-editor-search-close) {
+      grid-area: close;
+      justify-self: end;
+    }
   }
 
   :global(.editor-shell .editor-host .ml-editor-search-input) {
@@ -1478,18 +1647,20 @@
     height: 32px;
     padding: 0 9px;
     box-sizing: border-box;
-    border: 1px solid var(--line);
+    border: 1px solid var(--line-strong);
     border-radius: var(--radius-control);
-    outline: 0;
     color: var(--text);
     background: var(--surface-muted);
     font: inherit;
     font-size: 15px;
+    transition:
+      border-color var(--duration-interaction, 100ms) var(--ease-out, ease-out),
+      outline-color var(--duration-interaction, 100ms) var(--ease-out, ease-out);
   }
 
   :global(.editor-shell .editor-host .ml-editor-search-input:focus) {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px var(--accent-soft);
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
   }
 
   :global(.editor-shell .editor-host .ml-editor-search-input::placeholder) {
@@ -1498,11 +1669,19 @@
 
   :global(.editor-shell .editor-host .ml-editor-search-count) {
     flex: 0 0 auto;
-    min-width: 42px;
+    min-width: 54px;
     color: var(--subtle);
-    font-size: 15px;
+    font-size: 14px;
+    font-variant-numeric: tabular-nums;
     text-align: center;
     white-space: nowrap;
+  }
+
+  :global(.editor-shell .editor-host .ml-editor-search-navigation) {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 2px;
   }
 
   :global(.editor-shell .editor-host .ml-editor-search-button),
@@ -1512,7 +1691,7 @@
     flex: 0 0 auto;
     align-items: center;
     justify-content: center;
-    height: 28px;
+    height: 32px;
     padding: 0;
     border: 0;
     border-radius: var(--radius-control);
@@ -1523,7 +1702,7 @@
   }
 
   :global(.editor-shell .editor-host .ml-editor-search-button) {
-    width: 28px;
+    width: 32px;
   }
 
   :global(.editor-shell .editor-host .ml-editor-search-button svg) {
@@ -1532,22 +1711,88 @@
 
   :global(.editor-shell .editor-host .ml-editor-search-toggle),
   :global(.editor-shell .editor-host .ml-editor-search-action) {
-    padding: 0 7px;
+    padding: 0 10px;
     font-size: 15px;
   }
 
-  :global(.editor-shell .editor-host .ml-editor-search-button:hover),
-  :global(.editor-shell .editor-host .ml-editor-search-toggle:hover),
-  :global(.editor-shell .editor-host .ml-editor-search-action:hover) {
+  :global(.editor-shell .editor-host .ml-editor-search-close) {
+    margin-left: 0;
+  }
+
+  :global(.editor-shell .editor-host .ml-editor-search-actions) {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 4px;
+    margin-top: 5px;
+    padding-top: 5px;
+    border-top: 1px solid var(--line);
+  }
+
+  :global(.editor-shell .editor-host .ml-editor-search-button:hover:not(:disabled)),
+  :global(.editor-shell .editor-host .ml-editor-search-toggle:hover:not(:disabled)),
+  :global(.editor-shell .editor-host .ml-editor-search-action:hover:not(:disabled)) {
     color: var(--text);
     background: var(--hover);
+  }
+
+  :global(.editor-shell .editor-host .ml-editor-search-toggle[aria-expanded="true"]:not(:disabled)) {
+    color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  .selection-toolbar button:active:not(:disabled),
+  .editor-context-menu button:active:not(:disabled),
+  :global(.editor-shell .editor-host .ml-editor-search-button:active:not(:disabled)),
+  :global(.editor-shell .editor-host .ml-editor-search-toggle:active:not(:disabled)),
+  :global(.editor-shell .editor-host .ml-editor-search-action:active:not(:disabled)) {
+    background-color: var(--button-pressed-bg, var(--pressed));
+  }
+
+  :global(.editor-shell .editor-host .ml-editor-search-button:disabled),
+  :global(.editor-shell .editor-host .ml-editor-search-toggle:disabled),
+  :global(.editor-shell .editor-host .ml-editor-search-action:disabled) {
+    color: var(--disabled);
+    background: transparent;
+    cursor: default;
   }
 
   :global(.editor-shell .editor-host .ml-editor-search-button:focus-visible),
   :global(.editor-shell .editor-host .ml-editor-search-toggle:focus-visible),
   :global(.editor-shell .editor-host .ml-editor-search-action:focus-visible) {
     outline: 2px solid var(--accent);
-    outline-offset: 1px;
+    outline-offset: 2px;
+  }
+
+  :global(.editor-shell .editor-host .ml-editor-search-option input:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  @media (forced-colors: active) {
+    .selection-toolbar .selection-heading-trigger[aria-expanded="true"],
+    .editor-context-menu button[aria-expanded="true"]:not(:disabled),
+    :global(.editor-shell .editor-host .ml-editor-search-toggle[aria-expanded="true"]:not(:disabled)) {
+      color: HighlightText;
+      background: Highlight;
+    }
+
+    .selection-toolbar button:focus-visible,
+    .editor-context-menu button:focus-visible,
+    .editor-context-menu.keyboard-opened:focus,
+    :global(.editor-shell .editor-host .ml-editor-search-button:focus-visible),
+    :global(.editor-shell .editor-host .ml-editor-search-toggle:focus-visible),
+    :global(.editor-shell .editor-host .ml-editor-search-action:focus-visible) {
+      outline-color: HighlightText;
+    }
+
+    :global(.editor-shell .editor-host .ml-editor-search-option input) {
+      accent-color: auto;
+    }
+
+    :global(.editor-shell .editor-host .ml-editor-search-option input:focus-visible) {
+      outline-color: HighlightText;
+    }
   }
 
   :global(.editor-shell .editor-host .ml-editor-search-replace) {
@@ -1559,21 +1804,52 @@
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 8px 12px;
+    gap: 6px 10px;
     padding: 2px 1px;
+  }
+
+  :global(.editor-shell .editor-host .ml-editor-search-options > .ml-editor-search-action) {
+    margin-left: auto;
+  }
+
+  :global(.editor-shell .editor-host .ml-editor-search-options > .ml-editor-search-action:not(:disabled)) {
+    box-sizing: border-box;
+    height: 32px;
+    padding: 0 9px;
+    border: 1px solid var(--line-strong);
+    color: var(--text);
+    background: var(--surface);
+  }
+
+  :global(.editor-shell .editor-host .ml-editor-search-options > .ml-editor-search-action:not(:disabled):hover) {
+    background: var(--hover);
   }
 
   :global(.editor-shell .editor-host .ml-editor-search-option) {
     display: inline-flex;
     align-items: center;
     gap: 5px;
+    min-height: 32px;
+    padding: 0 4px;
+    border-radius: var(--radius-control, 6px);
     color: var(--muted);
     font-size: 15px;
     white-space: nowrap;
     cursor: pointer;
+    transition:
+      color var(--duration-interaction, 100ms) var(--ease-out, ease-out),
+      background-color var(--duration-interaction, 100ms) var(--ease-out, ease-out);
+  }
+
+  :global(.editor-shell .editor-host .ml-editor-search-option:hover) {
+    color: var(--text);
+    background: var(--hover);
   }
 
   :global(.editor-shell .editor-host .ml-editor-search-option input) {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
     margin: 0;
     accent-color: var(--accent);
   }

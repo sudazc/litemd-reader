@@ -10,9 +10,19 @@
     "core:window:allow-destroy",
     "core:window:allow-toggle-maximize",
     "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
     "dialog:allow-open",
     "dialog:allow-save",
     "dialog:allow-confirm",
-    "opener:allow-open-url"
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "http://*" },
+        { "url": "https://*" },
+        { "url": "mailto:*" },
+        { "url": "tel:*" },
+        { "url": "ms-settings:defaultapps" }
+      ]
+    }
   ]
 }

@@ -26,15 +26,15 @@ const mermaidThemeCss = `
   .node rect, .node circle, .node ellipse, .node polygon, .node path,
   .actor, .actor-top, .actor-bottom, .classGroup rect, .stateGroup rect,
   .er.entityBox {
-    fill: var(--surface-muted, #f8f9fb) !important;
-    stroke: var(--line-strong, #d7dde5) !important;
+    fill: var(--surface-muted, #f1f3f6) !important;
+    stroke: var(--line-strong, #818a99) !important;
   }
   text, .nodeLabel, .labelText, .messageText {
-    fill: var(--text, #28313f) !important;
-    color: var(--text, #28313f) !important;
+    fill: var(--text, #252830) !important;
+    color: var(--text, #252830) !important;
   }
   .edgePath .path, .flowchart-link, .messageLine0, .messageLine1, .loopLine {
-    stroke: var(--muted, #596575) !important;
+    stroke: var(--muted, #626875) !important;
   }
   .edgeLabel rect, .labelBkg { fill: var(--surface, #ffffff) !important; }
 `;
@@ -72,25 +72,25 @@ function loadMermaidRenderer(): Promise<MermaidRenderer> {
         securityLevel: "strict",
         suppressErrorRendering: true,
         maxTextSize: maxMermaidDiagramChars,
-        secure: ["securityLevel", "startOnLoad", "suppressErrorRendering", "maxTextSize", "themeCSS"],
+        secure: ["securityLevel", "startOnLoad", "suppressErrorRendering", "maxTextSize", "themeCSS", "htmlLabels"],
         theme: "base",
         themeCSS: mermaidThemeCss,
+        htmlLabels: false,
         themeVariables: {
           background: "transparent",
-          primaryColor: "#f8f9fb",
-          primaryTextColor: "#28313f",
-          primaryBorderColor: "#d7dde5",
-          lineColor: "#596575",
-          textColor: "#28313f",
-          mainBkg: "#f8f9fb",
-          nodeBorder: "#d7dde5",
-          clusterBkg: "#f8f9fb",
-          clusterBorder: "#d7dde5",
-          titleColor: "#28313f",
+          primaryColor: "#f1f3f6",
+          primaryTextColor: "#252830",
+          primaryBorderColor: "#818a99",
+          lineColor: "#626875",
+          textColor: "#252830",
+          mainBkg: "#f1f3f6",
+          nodeBorder: "#818a99",
+          clusterBkg: "#f1f3f6",
+          clusterBorder: "#818a99",
+          titleColor: "#252830",
           edgeLabelBackground: "#ffffff",
           fontFamily: '"Segoe UI", "Microsoft YaHei UI", sans-serif',
         },
-        flowchart: { htmlLabels: false },
       });
       return mermaid;
     });
@@ -159,6 +159,48 @@ function slugify(value: string): string {
     .replace(/^-|-$/g, "") || "section";
 }
 
+function collectHeadings(tokens: Token[]): DocumentHeading[] {
+  const headings: DocumentHeading[] = [];
+  const slugCounts = new Map<string, number>();
+  const usedHeadingIds = new Set<string>();
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.type !== "heading_open") continue;
+
+    const inline = tokens[index + 1];
+    const title = inline?.children
+      ?.filter((child) => ["text", "code_inline", "image", "math_inline"].includes(child.type))
+      .map((child) => child.content)
+      .join("")
+      .trim() || inline?.content || "未命名标题";
+    const base = slugify(title);
+    let count = slugCounts.get(base) ?? 0;
+    let id = count === 0 ? base : `${base}-${count}`;
+    while (usedHeadingIds.has(id)) {
+      count += 1;
+      id = `${base}-${count}`;
+    }
+    slugCounts.set(base, count + 1);
+    usedHeadingIds.add(id);
+
+    token.attrSet("id", id);
+    headings.push({
+      id,
+      title,
+      level: Number(token.tag.slice(1)) || 1,
+      line: token.map?.[0] ?? 0,
+    });
+  }
+
+  return headings;
+}
+
+export function extractDocumentHeadings(source: string): DocumentHeading[] {
+  const parser = new MarkdownIt({ html: false, linkify: true, typographer: false });
+  return collectHeadings(parser.parse(source, {}));
+}
+
 function replaceWithText(token: Token, text: string) {
   token.type = "text";
   token.tag = "";
@@ -193,6 +235,15 @@ export async function renderMarkdown(
       return escapeHtml(code);
     },
   }).use(taskLists, { enabled: false });
+
+  const defaultTableOpenRenderer = parser.renderer.rules.table_open;
+  const defaultTableCloseRenderer = parser.renderer.rules.table_close;
+  if (defaultTableOpenRenderer && defaultTableCloseRenderer) {
+    parser.renderer.rules.table_open = (...args) =>
+      `<div class="reader-table-wrap" role="region" aria-label="表格内容，可使用方向键横向滚动" tabindex="0">${defaultTableOpenRenderer(...args)}`;
+    parser.renderer.rules.table_close = (...args) =>
+      `${defaultTableCloseRenderer(...args)}</div>`;
+  }
 
   let tokens = parser.parse(source, {});
   if (hasMathContent(tokens, source)) {
@@ -261,10 +312,6 @@ export async function renderMarkdown(
     return `${marker}\n`;
   };
 
-  const headings: DocumentHeading[] = [];
-  const slugCounts = new Map<string, number>();
-  const usedHeadingIds = new Set<string>();
-
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (
@@ -274,32 +321,9 @@ export async function renderMarkdown(
       token.attrSet("data-source-line-start", String(token.map[0] + 1));
       token.attrSet("data-source-line-end", String(Math.max(token.map[1], token.map[0] + 1)));
     }
-    if (token.type !== "heading_open") continue;
-
-    const inline = tokens[index + 1];
-    const title = inline?.children
-      ?.filter((child) => ["text", "code_inline", "image", "math_inline"].includes(child.type))
-      .map((child) => child.content)
-      .join("")
-      .trim() || inline?.content || "未命名标题";
-    const base = slugify(title);
-    let count = slugCounts.get(base) ?? 0;
-    let id = count === 0 ? base : `${base}-${count}`;
-    while (usedHeadingIds.has(id)) {
-      count += 1;
-      id = `${base}-${count}`;
-    }
-    slugCounts.set(base, count + 1);
-    usedHeadingIds.add(id);
-
-    token.attrSet("id", id);
-    headings.push({
-      id,
-      title,
-      level: Number(token.tag.slice(1)) || 1,
-      line: token.map?.[0] ?? 0,
-    });
   }
+
+  const headings = collectHeadings(tokens);
 
   const imageTokens = tokens
     .flatMap((token) => token.children ?? [])

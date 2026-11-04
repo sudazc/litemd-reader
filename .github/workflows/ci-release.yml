@@ -78,7 +78,7 @@ jobs:
           $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
           $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $cargoMetadata = cargo metadata --locked --no-deps --format-version 1 | Out-String
-          $cargoVersion = (ConvertFrom-Json $cargoMetadata).packages | Where-Object { $_.name -eq 'leanreader' } | Select-Object -ExpandProperty version
+          $cargoVersion = (ConvertFrom-Json $cargoMetadata).packages | Where-Object { $_.name -eq 'litemd' } | Select-Object -ExpandProperty version
           $versions = @($tauriVersion, $packageVersion, $cargoVersion)
           $distinctVersions = @($versions | Select-Object -Unique)
           if ($distinctVersions.Length -ne 1) {
@@ -94,7 +94,7 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          name: LeanReader ${{ github.ref_name }}
+          name: LiteMD ${{ github.ref_name }}
           generate_release_notes: true
           draft: false
           prerelease: false

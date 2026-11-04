@@ -3,41 +3,42 @@
   import { invoke, isTauri } from "@tauri-apps/api/core";
   import { getVersion } from "@tauri-apps/api/app";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { confirm, open, save } from "@tauri-apps/plugin-dialog";
+  import { open, save } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import MarkdownEditor from "$lib/MarkdownEditor.svelte";
   import { confirmDocumentReload } from "$lib/reload-confirmation";
-  import { fadeTransition, panelTransition, popupTransition } from "$lib/popup-transition";
+  import {
+    fadeTransition,
+    panelTransition,
+    popupTransition,
+    shiftTransition,
+  } from "$lib/popup-transition";
+  import { tooltipLayer } from "$lib/tooltip";
   import {
     BookOpen,
-    Bold,
     Check,
     ChevronDown,
     ChevronLeft,
     ChevronRight,
-    Code,
+    Copy,
     Download,
-    Eye,
-    EyeOff,
-    FilePlus,
     FileText,
     FolderOpen,
+    History,
     House,
-    Italic,
-    Link,
     LogOut,
     Minus,
+    Moon,
     PanelLeftClose,
     PanelLeftOpen,
     Pencil,
     Plus,
     Printer,
-    RotateCcw,
     Search,
     Save,
     Settings,
     Square,
-    TextWrap,
+    Sun,
     Trash2,
     X,
   } from "lucide-svelte";
@@ -75,12 +76,12 @@
     editorState: EditorState | null;
     editorCompartments: EditorCompartments | null;
     savedEditorDoc: EditorState["doc"] | null;
-    previewedEditorDoc: EditorState["doc"] | null;
-    previewedEditorPath: string | null;
     path: string;
     name: string;
     source: string;
     savedSource: string;
+    renderedSource: string;
+    renderedPath: string;
     html: string;
     headings: DocumentHeading[];
     scrollTop: number;
@@ -93,8 +94,7 @@
     version: FileVersion | null;
     externalChange: "modified" | "missing" | null;
     editing: boolean;
-    previewGeneration: number;
-    livePreviewGeneration: number;
+    renderGeneration: number;
     loadRequestId: string | null;
     loading: boolean;
     loadStarted: boolean;
@@ -118,6 +118,13 @@
     activePath: string | null;
   };
 
+  type ConfirmationRequest = {
+    title: string;
+    message: string;
+    confirmLabel: string;
+    tone: "primary" | "danger";
+  };
+
   type DraftRecoveryRecord = {
     name: string;
     source: string;
@@ -129,6 +136,7 @@
 
   type MarkdownModule = typeof import("$lib/markdown");
   type MarkdownImageLoader = (source: string) => Promise<string>;
+  type WindowResizeDirection = "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West";
   type EditorCompartments = {
     lineWrapping: Compartment;
     indentation: Compartment;
@@ -139,37 +147,54 @@
   const sessionStorageKey = "markdown-reader:session";
   const draftRecoveryStorageKey = "markdown-reader:recovery-drafts";
   const maxRecentFiles = 8;
-  const defaultFontSize = 16;
+  const defaultFontSize = 20;
   const minFontSize = 15;
   const maxFontSize = 25;
   const defaultLineHeight = 1.8;
   const lineHeightOptions = [1.6, 1.8, 2] as const;
+  const defaultTocVisible = false;
+  const windowResizeCursorByDirection: Record<WindowResizeDirection, string> = {
+    East: "ew-resize",
+    North: "ns-resize",
+    NorthEast: "nesw-resize",
+    NorthWest: "nwse-resize",
+    South: "ns-resize",
+    SouthEast: "nwse-resize",
+    SouthWest: "nesw-resize",
+    West: "ew-resize",
+  };
+  const windowResizeEdgeSize = 6;
   const defaultEditorIndentWidth = 2;
   const editorIndentWidths = [2, 4, 8] as const;
-  const defaultOutlineWidth = 232;
-  const minOutlineWidth = 176;
-  const maxOutlineWidth = 360;
-  const minEditorSplitRatio = 0.25;
-  const maxEditorSplitRatio = 0.75;
-
+  const defaultOutlineWidth = 240;
+  const minOutlineWidth = 200;
+  const maxOutlineWidth = 340;
   let tabs = $state<ReaderTab[]>([]);
   let activeTabId = $state<string | null>(null);
+  let settingsOpen = $state(false);
   let activeTab = $derived(tabs.find((tab) => tab.id === activeTabId) ?? null);
+  let focusableTabId = $derived(activeTabId ?? tabs[0]?.id ?? null);
   let recentFiles = $state<RecentFile[]>([]);
+  let hoveredRecentPath = $state<string | null>(null);
+  let focusedRecentPath = $state<string | null>(null);
+  let pointerCanHover = $state(true);
   let darkMode = $state(false);
-  let tocVisible = $state(true);
+  let themeSwitching = $state(false);
+  let tocVisible = $state(defaultTocVisible);
   let outlineWidth = $state(defaultOutlineWidth);
   let fontSize = $state(defaultFontSize);
   let lineHeight = $state<(typeof lineHeightOptions)[number]>(defaultLineHeight);
   let restoreLastSession = $state(true);
   let defaultOpenDirectory = $state("");
   let appVersion = $state("0.1.0");
-  let settingsOpen = $state(false);
+  let windowMaximized = $state(false);
+  let windowFocused = $state(true);
+  let resizeDirection = $state<WindowResizeDirection | null>(null);
+  let settingsCategory = $state<"appearance" | "behavior" | "files" | "about">("appearance");
   let editorWordWrap = $state(true);
   let editorIndentWidth = $state(defaultEditorIndentWidth);
-  let editorSplitRatio = $state(0.5);
-  let editorPreviewVisible = $state(false);
-  let openMenu = $state<"file" | "recent" | "view" | "insert" | null>(null);
+  const visibleOutlineWidth = $derived(Math.min(outlineWidth, maxOutlineWidth));
+  let openMenu = $state<"file" | "recent" | "tabs" | null>(null);
   let searchOpen = $state(false);
   let searchQuery = $state("");
   let searchCount = $state(0);
@@ -181,6 +206,9 @@
   let pendingCloseIds = $state<string[]>([]);
   let closeAfterConfirmation = $state(false);
   let closeSaveInProgress = $state(false);
+  let pendingConfirmation = $state<ConfirmationRequest | null>(null);
+  let confirmationResolver: ((confirmed: boolean) => void) | undefined;
+  let confirmationReturnFocus: HTMLElement | null = null;
   let allowConfirmedWindowClose = false;
   let closePromptGeneration = 0;
   let editorComponent:
@@ -189,34 +217,66 @@
         scrollToProgress(progress: number): void;
         focusEditor(): void;
         openSearch(): void;
-        insertMarkdown(action: "bold" | "italic" | "inlineCode" | "codeBlock" | "link"): void;
+        closeSearch(): void;
+        toggleSearch(): void;
       }
     | undefined = $state();
+  let tabStripContainerElement = $state<HTMLDivElement>();
   let tabStripElement = $state<HTMLDivElement>();
+  let tabListElement = $state<HTMLDivElement>();
+  let hasTabOverflow = $state(false);
   let readerViewport = $state<HTMLDivElement>();
   let readerContent = $state<HTMLElement>();
-  let editorSplitElement = $state<HTMLDivElement>();
-  let editorSplitResizeBounds: {
-    left: number;
-    splitterWidth: number;
-    availableWidth: number;
-  } | null = null;
   let outlineResizeBounds: { left: number; splitterWidth: number } | null = null;
   let searchInput = $state<HTMLInputElement>();
+  let settingsWorkspace = $state<HTMLElement>();
   let lastFontZoomAt = Number.NEGATIVE_INFINITY;
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  let themeSwitchTimer: ReturnType<typeof setTimeout> | undefined;
+  let noticePersistent = $state(false);
+  let noticeRemainingMs = 3000;
+  let noticeDeadline = 0;
+  let noticePointerInside = false;
+  let noticeFocusInside = false;
+  let imageZoomClose = $state<HTMLButtonElement>();
+  let imageZoomTrigger: HTMLImageElement | null = null;
+  let draggingFiles = $state(false);
   let sessionSaveTimer: ReturnType<typeof setTimeout> | undefined;
   let draftRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
   let externalCheckTimer: ReturnType<typeof setInterval> | undefined;
-  const editorPreviewTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const editorOutlineTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const readerCodeCopyTimers = new WeakMap<HTMLButtonElement, ReturnType<typeof setTimeout>>();
   const externalChecksInFlight = new Set<string>();
   let restoringSession = false;
-  let draggedTabId: string | null = null;
+  let draggedTabId = $state<string | null>(null);
+  let dropTargetTabId = $state<string | null>(null);
+  let dropTargetSide = $state<"before" | "after" | null>(null);
   let unlistenNativeEvents: Array<() => void> = [];
   // 同一标签的保存操作串行执行，避免并发写入造成误报冲突
   const saveOperations = new WeakMap<ReaderTab, Promise<boolean>>();
   let markdownModulePromise: Promise<MarkdownModule> | undefined;
+
+  $effect(() => {
+    const container = tabStripContainerElement;
+    const list = tabListElement;
+    tabs.length;
+    if (!container || !list) {
+      hasTabOverflow = false;
+      if (openMenu === "tabs") openMenu = null;
+      return;
+    }
+
+    const updateOverflow = () => {
+      const overflows = list.scrollWidth > container.clientWidth - 8;
+      hasTabOverflow = overflows;
+      if (!overflows && openMenu === "tabs") openMenu = null;
+    };
+    const observer = new ResizeObserver(updateOverflow);
+    observer.observe(container);
+    observer.observe(list);
+    void tick().then(updateOverflow);
+    return () => observer.disconnect();
+  });
 
   function loadMarkdownModule(): Promise<MarkdownModule> {
     if (markdownModulePromise) return markdownModulePromise;
@@ -250,7 +310,7 @@
     let rendered = { html: tab.html, headings: tab.headings };
     if (
       tab.editing &&
-      (tab.previewedEditorDoc !== tab.editorState?.doc || tab.previewedEditorPath !== tab.path)
+      (source !== tab.renderedSource || pathKey(tab.path) !== pathKey(tab.renderedPath))
     ) {
       try {
         rendered = await renderMarkdown(source, loadDocumentImage(tab.path));
@@ -262,11 +322,13 @@
 
     const currentTab = tabs.find((item) => item.id === tab.id);
     if (!currentTab || activeTabId !== tab.id || sourceForTab(currentTab) !== source) {
-      showNotice("文档内容已变化，请重新打印。");
+      showNotice("文档内容已变化，请重新打印。", true);
       return;
     }
     currentTab.html = rendered.html;
     currentTab.headings = rendered.headings;
+    currentTab.renderedSource = source;
+    currentTab.renderedPath = currentTab.path;
     tabs = [...tabs];
     await tick();
     if (activeTabId === tab.id) window.print();
@@ -288,6 +350,7 @@
         bodyHtml: rendered.html,
         darkMode,
         fontSize,
+        lineHeight,
         katexCss,
       });
       const defaultPath = tab.path
@@ -326,6 +389,72 @@
     return path;
   }
 
+  function recentDirectoryLabel(file: RecentFile): string {
+    const directorySegments = (path: string) => {
+      const normalized = displayPath(path).replaceAll("/", "\\");
+      const separatorIndex = normalized.lastIndexOf("\\");
+      const directory = separatorIndex >= 0 ? normalized.slice(0, separatorIndex) : normalized;
+      return directory.split("\\").filter(Boolean);
+    };
+    const segments = directorySegments(file.path);
+    const sameNameDirectories = recentFiles
+      .filter(
+        (item) =>
+          item.name.toLowerCase() === file.name.toLowerCase() &&
+          pathKey(item.path) !== pathKey(file.path),
+      )
+      .map((item) => directorySegments(item.path));
+
+    let visibleSegments = Math.min(2, segments.length);
+    while (
+      visibleSegments < segments.length &&
+      sameNameDirectories.some((other) =>
+        other.slice(-visibleSegments).join("\\").toLowerCase() ===
+        segments.slice(-visibleSegments).join("\\").toLowerCase(),
+      )
+    ) {
+      visibleSegments += 1;
+    }
+
+    const suffix = segments.slice(-visibleSegments).join("\\");
+    return visibleSegments < segments.length ? "…\\" + suffix : suffix;
+  }
+
+  function tabDirectoryHint(tab: ReaderTab): string | null {
+    if (!tab.path) return null;
+
+    const directorySegments = (path: string) => {
+      const normalized = displayPath(path).replaceAll("/", "\\");
+      const separatorIndex = normalized.lastIndexOf("\\");
+      if (separatorIndex < 0) return [];
+      return normalized.slice(0, separatorIndex).split("\\").filter(Boolean);
+    };
+    const segments = directorySegments(tab.path);
+    const sameNameDirectories = tabs
+      .filter(
+        (other) =>
+          other.id !== tab.id &&
+          !!other.path &&
+          other.name.toLowerCase() === tab.name.toLowerCase() &&
+          pathKey(other.path) !== pathKey(tab.path!),
+      )
+      .map((other) => directorySegments(other.path));
+
+    if (sameNameDirectories.length === 0) return null;
+
+    for (let depth = 1; depth <= segments.length; depth += 1) {
+      const segment = segments[segments.length - depth];
+      const isUnique = sameNameDirectories.every(
+        (other) =>
+          other.length < depth ||
+          other[other.length - depth].toLowerCase() !== segment.toLowerCase(),
+      );
+      if (isUnique) return segment;
+    }
+
+    return segments.at(-1) ?? null;
+  }
+
   function nameFromPath(path: string): string {
     return path.split(/[\\/]/).filter(Boolean).at(-1) || "Markdown 文档";
   }
@@ -336,21 +465,112 @@
       : "smooth";
   }
 
-  function showNotice(message: string) {
+  function scheduleNoticeDismissal() {
+    if (!notice || noticePersistent || noticePointerInside || noticeFocusInside || noticeTimer) return;
+    noticeDeadline = performance.now() + noticeRemainingMs;
+    noticeTimer = setTimeout(() => {
+      notice = "";
+      noticeTimer = undefined;
+      noticeRemainingMs = 3000;
+      noticeDeadline = 0;
+    }, noticeRemainingMs);
+  }
+
+  function pauseNoticeDismissal() {
+    if (!noticeTimer) return;
+    clearTimeout(noticeTimer);
+    noticeTimer = undefined;
+    noticeRemainingMs = Math.max(0, noticeDeadline - performance.now());
+    noticeDeadline = 0;
+  }
+
+  function resumeNoticeDismissal() {
+    if (noticePointerInside || noticeFocusInside) return;
+    scheduleNoticeDismissal();
+  }
+
+  function handleNoticePointerEnter() {
+    noticePointerInside = true;
+    pauseNoticeDismissal();
+  }
+
+  function handleNoticePointerLeave() {
+    noticePointerInside = false;
+    resumeNoticeDismissal();
+  }
+
+  function handleNoticeFocusIn() {
+    noticeFocusInside = true;
+    pauseNoticeDismissal();
+  }
+
+  function handleNoticeFocusOut(event: FocusEvent) {
+    const noticeElement = event.currentTarget as HTMLElement;
+    const nextTarget = event.relatedTarget;
+    noticeFocusInside = nextTarget instanceof Node && noticeElement.contains(nextTarget);
+    resumeNoticeDismissal();
+  }
+
+  function showNotice(message: string, persistent = /(?:失败|无法|冲突|未能|不能)/.test(message)) {
     notice = message;
+    noticePersistent = persistent;
     if (noticeTimer) clearTimeout(noticeTimer);
-    noticeTimer = setTimeout(() => (notice = ""), 3600);
+    noticeTimer = undefined;
+    noticeRemainingMs = 3000;
+    noticeDeadline = 0;
+    scheduleNoticeDismissal();
+  }
+
+  function dismissNotice(shouldRestoreFocus = true) {
+    const restoreFocus =
+      shouldRestoreFocus &&
+      document.activeElement instanceof Element &&
+      !!document.activeElement.closest(".notice");
+    if (noticeTimer) clearTimeout(noticeTimer);
+    noticeTimer = undefined;
+    noticeRemainingMs = 3000;
+    noticeDeadline = 0;
+    noticePointerInside = false;
+    noticeFocusInside = false;
+    notice = "";
+    noticePersistent = false;
+    if (!restoreFocus) return;
+
+    void tick().then(() => {
+      if (settingsOpen) {
+        focusSettingsCategory();
+      } else if (pendingConfirmation) {
+        document.querySelector<HTMLButtonElement>(".action-confirm-dialog [data-cancel-confirm]")?.focus();
+      } else if (pendingCloseIds.length) {
+        document.querySelector<HTMLButtonElement>(".confirm-dialog [data-cancel-close]")?.focus();
+      } else if (zoomedImage) {
+        imageZoomClose?.focus();
+      } else if (activeTab) {
+        tabStripElement?.querySelector<HTMLElement>(".tab-shell.selected .tab-button")?.focus();
+      } else {
+        focusToolbarEntry();
+      }
+    });
+  }
+
+  function focusToolbarEntry() {
+    const entry =
+      document.querySelector<HTMLButtonElement>('[data-menu-trigger="file"]') ??
+      document.querySelector<HTMLButtonElement>(".settings-toggle");
+    entry?.focus();
   }
 
   function displayError(error: unknown, fallback: string) {
     return typeof error === "string" && error.trim() ? error : fallback;
   }
 
-  function saveRecentFiles() {
+  function saveRecentFiles(): boolean {
     try {
       localStorage.setItem(recentStorageKey, JSON.stringify(recentFiles));
+      return true;
     } catch {
       showNotice("无法保存最近打开记录");
+      return false;
     }
   }
 
@@ -363,21 +583,60 @@
     saveRecentFiles();
   }
 
-  function removeRecent(path: string) {
-    const key = pathKey(path);
-    recentFiles = recentFiles.filter((file) => pathKey(file.path) !== key);
-    saveRecentFiles();
-  }
-
   function clearRecentFiles() {
     recentFiles = [];
-    saveRecentFiles();
+    hoveredRecentPath = null;
+    focusedRecentPath = null;
+    const saved = saveRecentFiles();
     openMenu = null;
+    if (saved) showNotice("已清空最近记录");
+    void tick().then(focusToolbarEntry);
+  }
+
+  function isRecentRemoveVisible(path: string): boolean {
+    return !pointerCanHover || hoveredRecentPath === path || focusedRecentPath === path;
+  }
+
+  function clearRecentRowFocus(path: string, event: FocusEvent) {
+    const row = event.currentTarget as HTMLElement;
+    if (!row.contains(event.relatedTarget as Node | null) && focusedRecentPath === path) {
+      focusedRecentPath = null;
+    }
+  }
+
+  function removeRecentFile(path: string, index: number) {
+    const key = pathKey(path);
+    recentFiles = recentFiles.filter((file) => pathKey(file.path) !== key);
+    hoveredRecentPath = null;
+    focusedRecentPath = null;
+    const saved = saveRecentFiles();
+    if (saved) showNotice("已从最近记录移除");
+
+    const nextIndex = Math.min(index, recentFiles.length - 1);
+    void tick().then(() => {
+      if (nextIndex >= 0 && (openMenu === "file" || openMenu === "recent")) {
+        document
+          .querySelector<HTMLButtonElement>(`.dropdown-menu [data-recent-open-index="${nextIndex}"]`)
+          ?.focus();
+        return;
+      }
+
+      if (openMenu === "file") {
+        document
+          .querySelector<HTMLElement>(
+            ".dropdown-menu [role^='menuitem']:not([disabled]):not([aria-hidden='true'])",
+          )
+          ?.focus();
+        return;
+      }
+
+      if (openMenu === "recent") openMenu = null;
+      focusToolbarEntry();
+    });
   }
 
   function restorePreferences() {
-    const responsiveDefaultOutlineWidth = window.innerWidth <= 1100 ? 206 : defaultOutlineWidth;
-    outlineWidth = responsiveDefaultOutlineWidth;
+    outlineWidth = defaultOutlineWidth;
     try {
       const stored = localStorage.getItem(preferenceStorageKey);
       if (!stored) return;
@@ -391,16 +650,15 @@
         editorWordWrap?: boolean;
         editorIndentWidth?: number;
         outlineWidth?: number;
-        editorSplitRatio?: number;
-        editorPreviewVisible?: boolean;
       };
       darkMode = typeof preferences.darkMode === "boolean" ? preferences.darkMode : false;
-      tocVisible = typeof preferences.tocVisible === "boolean" ? preferences.tocVisible : true;
+      tocVisible =
+        typeof preferences.tocVisible === "boolean" ? preferences.tocVisible : defaultTocVisible;
       const savedOutlineWidth = preferences.outlineWidth;
       outlineWidth =
         typeof savedOutlineWidth === "number" && Number.isFinite(savedOutlineWidth)
           ? Math.min(maxOutlineWidth, Math.max(minOutlineWidth, savedOutlineWidth))
-          : responsiveDefaultOutlineWidth;
+          : defaultOutlineWidth;
       const savedFontSize = preferences.fontSize;
       fontSize =
         typeof savedFontSize === "number" && Number.isFinite(savedFontSize)
@@ -422,15 +680,6 @@
         editorIndentWidths.some((width) => width === savedIndentWidth)
           ? savedIndentWidth
           : defaultEditorIndentWidth;
-      const savedSplitRatio = preferences.editorSplitRatio;
-      editorSplitRatio =
-        typeof savedSplitRatio === "number" && Number.isFinite(savedSplitRatio)
-          ? Math.min(maxEditorSplitRatio, Math.max(minEditorSplitRatio, savedSplitRatio))
-          : 0.5;
-      editorPreviewVisible =
-        typeof preferences.editorPreviewVisible === "boolean"
-          ? preferences.editorPreviewVisible
-          : false;
     } catch {
       try {
         localStorage.removeItem(preferenceStorageKey);
@@ -454,8 +703,6 @@
           defaultOpenDirectory,
           editorWordWrap,
           editorIndentWidth,
-          editorSplitRatio,
-          editorPreviewVisible,
         }),
       );
     } catch {
@@ -510,13 +757,13 @@
 
   function showWriteConflict(tab: ReaderTab, targetPath: string, message: string) {
     if (pathKey(targetPath) !== pathKey(tab.path)) {
-      showNotice("另存为目标文件已变化，未覆盖。请重新选择位置后重试。");
+      showNotice("另存为目标文件已变化，未覆盖。请重新选择位置后重试。", true);
     } else if (message.includes("删除或移动")) {
       tab.externalChange = "missing";
-      showNotice("原文件已移动或删除，未覆盖。请另存为。");
+      showNotice("原文件已移动或删除，未覆盖。请另存为。", true);
     } else {
       tab.externalChange = "modified";
-      showNotice("文件已被外部修改，未覆盖。请重新载入或另存为。");
+      showNotice("文件已被外部修改，未覆盖。请重新载入或另存为。", true);
     }
   }
 
@@ -642,11 +889,13 @@
         if (sourceForTab(tab) !== source) return;
         tab.html = rendered.html;
         tab.headings = rendered.headings;
+        tab.renderedSource = source;
+        tab.renderedPath = tab.path;
       }));
       showNotice(`已恢复 ${restoredTabs.length} 份未保存文档`);
     } catch {
       restoredTabs.forEach((tab) => (tab.editing = true));
-      showNotice("未保存文档已恢复，预览暂时无法生成。");
+      showNotice("未保存文档已恢复，阅读内容暂时无法生成。");
     }
   }
 
@@ -727,6 +976,17 @@
   }
 
   onMount(() => {
+    pointerCanHover = window.matchMedia("(hover: hover)").matches;
+    const handleWindowFocus = () => {
+      windowFocused = true;
+    };
+    const handleWindowBlur = () => {
+      windowFocused = false;
+    };
+    windowFocused = document.hasFocus();
+    window.addEventListener("focus", handleWindowFocus);
+    window.addEventListener("blur", handleWindowBlur);
+
     try {
       const stored = localStorage.getItem(recentStorageKey);
       if (stored) {
@@ -754,8 +1014,23 @@
     void restoreStartupFiles();
     if (isTauri()) {
       const currentWindow = getCurrentWindow();
+      void syncMaximizedState();
+      void currentWindow
+        .onResized(() => void syncMaximizedState())
+        .then((unlisten) => unlistenNativeEvents.push(unlisten))
+        .catch(() => {});
       void currentWindow.onDragDropEvent((event) => {
+        if (event.payload.type === "enter") {
+          draggingFiles = event.payload.paths.some((path) => /\.(?:md|markdown)$/i.test(path));
+          return;
+        }
+        if (event.payload.type === "leave") {
+          draggingFiles = false;
+          return;
+        }
         if (event.payload.type !== "drop") return;
+        draggingFiles = false;
+        if (pendingConfirmation || pendingCloseIds.length || zoomedImage) return;
         const markdownPaths = event.payload.paths.filter((path) => /\.(?:md|markdown)$/i.test(path));
         if (markdownPaths.length < event.payload.paths.length) {
           showNotice("仅支持拖放 .md 和 .markdown 文件");
@@ -765,6 +1040,11 @@
       void currentWindow.onCloseRequested((event) => {
         if (allowConfirmedWindowClose) {
           allowConfirmedWindowClose = false;
+          return;
+        }
+        if (pendingConfirmation) {
+          event.preventDefault();
+          resolveActionConfirmation(false);
           return;
         }
         persistSession();
@@ -782,7 +1062,9 @@
       const modifier = event.ctrlKey || event.metaKey;
       if (!modifier || !event.shiftKey || event.key.toLocaleLowerCase() !== "s") return;
       event.preventDefault();
-      if (!pendingCloseIds.length) void saveActiveTab(true);
+      if (!pendingCloseIds.length && !pendingConfirmation && !settingsOpen && !zoomedImage) {
+        void saveActiveTab(true);
+      }
     };
 
     const handleKeydown = (event: KeyboardEvent) => {
@@ -792,7 +1074,10 @@
 
       if (event.key === "Escape") {
         if (zoomedImage) {
-          zoomedImage = null;
+          closeImagePreview();
+        } else if (pendingConfirmation) {
+          event.preventDefault();
+          resolveActionConfirmation(false);
         } else if (pendingCloseIds.length) {
           cancelPendingClose();
         } else if (tabContextMenu) {
@@ -800,13 +1085,22 @@
         } else if (searchOpen) {
           closeSearch();
         } else if (settingsOpen) {
-          settingsOpen = false;
-          document.querySelector<HTMLButtonElement>(".settings-toggle")?.focus();
+          closeSettings();
         } else {
           openMenu = null;
         }
         return;
       }
+
+      if (settingsOpen) {
+        if (modifier && key === "w") {
+          event.preventDefault();
+          closeSettings();
+        }
+        return;
+      }
+
+      if (zoomedImage || pendingCloseIds.length || pendingConfirmation) return;
 
       if (modifier && key === "p") {
         event.preventDefault();
@@ -814,7 +1108,6 @@
         return;
       }
 
-      if (pendingCloseIds.length) return;
       if (!modifier) return;
       if (key === "o") {
         event.preventDefault();
@@ -841,8 +1134,7 @@
         changeFontSize(-1);
       } else if (key === "0") {
         event.preventDefault();
-        fontSize = defaultFontSize;
-        savePreferences();
+        resetReadingFontSize();
       } else if (key === "tab") {
         event.preventDefault();
         cycleTab(event.shiftKey ? -1 : 1);
@@ -852,11 +1144,14 @@
     window.addEventListener("keydown", handleSaveAsKeydownCapture, true);
     window.addEventListener("keydown", handleKeydown);
     return () => {
+      window.removeEventListener("focus", handleWindowFocus);
+      window.removeEventListener("blur", handleWindowBlur);
       window.removeEventListener("keydown", handleSaveAsKeydownCapture, true);
       window.removeEventListener("keydown", handleKeydown);
-      for (const timer of editorPreviewTimers.values()) clearTimeout(timer);
-      editorPreviewTimers.clear();
+      for (const timer of editorOutlineTimers.values()) clearTimeout(timer);
+      editorOutlineTimers.clear();
       if (noticeTimer) clearTimeout(noticeTimer);
+      if (themeSwitchTimer) clearTimeout(themeSwitchTimer);
       if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
       if (draftRecoveryTimer) clearTimeout(draftRecoveryTimer);
       if (externalCheckTimer) clearInterval(externalCheckTimer);
@@ -896,7 +1191,6 @@
 
   async function openFiles(paths?: string[]) {
     openMenu = null;
-    settingsOpen = false;
     try {
       const selection =
         paths ??
@@ -907,6 +1201,8 @@
         }));
       if (!selection) return;
       const selectedPaths = Array.isArray(selection) ? selection : [selection];
+      if (!selectedPaths.length) return;
+      settingsOpen = false;
       await Promise.all(selectedPaths.map((path) => openPath(path)));
     } catch {
       showNotice("文件选择失败，请重试。");
@@ -920,6 +1216,7 @@
     forceReload = false,
     activateOnOpen = true,
   ) {
+    if (activateOnOpen) settingsOpen = false;
     const initialId = pathKey(path);
     const existing = tabs.find((tab) => tab.id === initialId || pathKey(tab.path) === initialId);
 
@@ -1044,12 +1341,12 @@
               editorState: null,
               editorCompartments: null,
               savedEditorDoc: null,
-              previewedEditorDoc: null,
-              previewedEditorPath: null,
               path: document.path,
               name: document.name,
               source: document.content,
               savedSource: document.content,
+              renderedSource: document.content,
+              renderedPath: document.path,
               html: rendered.html,
               headings: rendered.headings,
               scrollTop: savedScrollTop,
@@ -1109,7 +1406,9 @@
         } else {
           failedRequest.error = message;
           failedRequest.externalChange = null;
-          showNotice("无法打开文件，请检查文件是否存在且可读取。");
+          if (activeTabId !== failedRequest.id) {
+            showNotice("无法打开文件，请检查文件是否存在且可读取。");
+          }
         }
       } else {
         tabs = tabs.map((tab) =>
@@ -1117,13 +1416,16 @@
             ? { ...tab, loadRequestId: null, loading: false, error: message }
             : tab,
         );
-        showNotice("无法打开文件，请检查文件是否存在且可读取。");
+        if (activeTabId !== loadTabId) {
+          showNotice("无法打开文件，请检查文件是否存在且可读取。");
+        }
       }
       scheduleSessionSave();
     }
   }
 
   async function activateTab(id: string) {
+    settingsOpen = false;
     if (tabs.find((tab) => tab.id === id)?.editing && searchOpen) closeSearch();
     activeTabId = id;
     openMenu = null;
@@ -1148,15 +1450,6 @@
     }
   }
 
-  function showHomePage() {
-    activeTabId = null;
-    openMenu = null;
-    tabContextMenu = null;
-    activeHeadingId = null;
-    closeSearch();
-    scheduleSessionSave();
-  }
-
   function closeTab(id: string) {
     requestCloseTabs([id]);
   }
@@ -1173,12 +1466,12 @@
       editorState: null,
       editorCompartments: null,
       savedEditorDoc: null,
-      previewedEditorDoc: null,
-      previewedEditorPath: null,
       path,
       name: nameFromPath(path),
       source: "",
       savedSource: "",
+      renderedSource: "",
+      renderedPath: "",
       html: "",
       headings: [],
       scrollTop,
@@ -1191,8 +1484,7 @@
       version: null,
       externalChange: null,
       editing: false,
-      previewGeneration: 0,
-      livePreviewGeneration: 0,
+      renderGeneration: 0,
       loadRequestId: null,
       loading,
       loadStarted,
@@ -1210,12 +1502,55 @@
     performCloseTabs(closing);
   }
 
+  function requestConfirmation(request: ConfirmationRequest): Promise<boolean> {
+    if (pendingConfirmation || confirmationResolver) return Promise.resolve(false);
+    confirmationReturnFocus =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    pendingConfirmation = request;
+    const result = new Promise<boolean>((resolve) => {
+      confirmationResolver = resolve;
+    });
+    void tick().then(() => {
+      if (pendingConfirmation) {
+        document.querySelector<HTMLButtonElement>(".action-confirm-dialog [data-cancel-confirm]")?.focus();
+      }
+    });
+    return result;
+  }
+
+  function resolveActionConfirmation(confirmed: boolean) {
+    const resolve = confirmationResolver;
+    if (!resolve) return;
+    confirmationResolver = undefined;
+    pendingConfirmation = null;
+    const returnFocus = confirmationReturnFocus;
+    confirmationReturnFocus = null;
+    resolve(confirmed);
+    void tick().then(() => {
+      if (pendingConfirmation) {
+        document.querySelector<HTMLButtonElement>(".action-confirm-dialog [data-cancel-confirm]")?.focus();
+      } else if (returnFocus?.isConnected && !returnFocus.matches(":disabled")) {
+        returnFocus.focus({ preventScroll: true });
+      } else if (settingsOpen) {
+        focusSettingsCategory();
+      } else if (pendingCloseIds.length) {
+        document.querySelector<HTMLButtonElement>(".confirm-dialog [data-cancel-close]")?.focus();
+      } else if (zoomedImage) {
+        imageZoomClose?.focus();
+      } else if (activeTab) {
+        tabStripElement?.querySelector<HTMLElement>(".tab-shell.selected .tab-button")?.focus();
+      } else {
+        focusToolbarEntry();
+      }
+    });
+  }
+
   function showClosePrompt(ids: string[], closeWindowAfter: boolean) {
     closePromptGeneration += 1;
     pendingCloseIds = ids;
     closeAfterConfirmation = closeWindowAfter;
     void tick().then(() => {
-      document.querySelector<HTMLElement>(".confirm-dialog")?.focus();
+      document.querySelector<HTMLButtonElement>(".confirm-dialog [data-cancel-close]")?.focus();
     });
   }
 
@@ -1283,7 +1618,7 @@
         }
         if (closePromptGeneration !== promptGeneration) return;
         if (closing.some((id) => isDirty(tabs.find((tab) => tab.id === id)))) {
-          showNotice("保存期间文档又有修改，请再次保存后关闭。");
+          showNotice("保存期间文档又有修改，请再次保存后关闭。", true);
           return;
         }
       } finally {
@@ -1323,9 +1658,9 @@
     const wasActive = !!activeTabId && closing.has(activeTabId);
     for (const tab of tabs) {
       if (!closing.has(tab.id)) continue;
-      const previewTimer = editorPreviewTimers.get(tab.editorInstanceId);
-      if (previewTimer) clearTimeout(previewTimer);
-      editorPreviewTimers.delete(tab.editorInstanceId);
+      const outlineTimer = editorOutlineTimers.get(tab.editorInstanceId);
+      if (outlineTimer) clearTimeout(outlineTimer);
+      editorOutlineTimers.delete(tab.editorInstanceId);
     }
     tabs = tabs.filter((tab) => !closing.has(tab.id));
     persistDraftRecovery(tabs);
@@ -1349,36 +1684,58 @@
     scheduleSessionSave();
   }
 
-  function reorderTab(sourceId: string, targetId: string) {
+  function reorderTab(sourceId: string, targetId: string, side: "before" | "after") {
     const sourceIndex = tabs.findIndex((tab) => tab.id === sourceId);
     const targetIndex = tabs.findIndex((tab) => tab.id === targetId);
     if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return;
     const reordered = [...tabs];
     const [moved] = reordered.splice(sourceIndex, 1);
-    reordered.splice(targetIndex, 0, moved);
+    const targetIndexAfterRemoval = targetIndex - (sourceIndex < targetIndex ? 1 : 0);
+    const insertionIndex = targetIndexAfterRemoval + (side === "after" ? 1 : 0);
+    reordered.splice(insertionIndex, 0, moved);
     tabs = reordered;
     scheduleSessionSave();
   }
 
   function handleTabDragStart(event: DragEvent, tabId: string) {
     draggedTabId = tabId;
+    dropTargetTabId = null;
+    dropTargetSide = null;
     if (event.dataTransfer) {
       event.dataTransfer.effectAllowed = "move";
       event.dataTransfer.setData("text/plain", tabId);
     }
   }
 
-  function handleTabDragOver(event: DragEvent) {
+  function tabDropSide(event: DragEvent): "before" | "after" {
+    const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    return event.clientX < bounds.left + bounds.width / 2 ? "before" : "after";
+  }
+
+  function handleTabDragOver(event: DragEvent, targetId: string) {
     if (!draggedTabId) return;
+    if (targetId === draggedTabId) {
+      dropTargetTabId = null;
+      dropTargetSide = null;
+      return;
+    }
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    dropTargetTabId = targetId;
+    dropTargetSide = tabDropSide(event);
   }
 
   function handleTabDrop(event: DragEvent, targetId: string) {
     if (!draggedTabId) return;
     event.preventDefault();
-    reorderTab(draggedTabId, targetId);
+    if (targetId !== draggedTabId) reorderTab(draggedTabId, targetId, tabDropSide(event));
+    clearTabDragState();
+  }
+
+  function clearTabDragState() {
     draggedTabId = null;
+    dropTargetTabId = null;
+    dropTargetSide = null;
   }
 
   function showTabContextMenu(event: MouseEvent, tabId: string) {
@@ -1473,9 +1830,11 @@
     if (!tab) return;
     const editorInstanceId = tab.editorInstanceId;
     if (isDirty(tab)) {
-      const decision = await confirmDocumentReload(() => sourceForTab(tab), () => confirm("重新载入会放弃这篇文档的未保存修改。是否继续？", {
+      const decision = await confirmDocumentReload(() => sourceForTab(tab), () => requestConfirmation({
         title: "放弃未保存的修改？",
-        kind: "warning",
+        message: `重新载入将放弃“${tab.name}”的未保存修改。`,
+        confirmLabel: "重新载入",
+        tone: "danger",
       }));
       if (decision === "changed") {
         showNotice("确认期间文档又有修改，重新载入已取消。");
@@ -1510,7 +1869,7 @@
         ? latestTab.editorState.doc.eq(confirmedEditorDoc)
         : sourceForTab(latestTab) === confirmedSource;
       if (!matchesConfirmedContent) {
-        showNotice("等待写入期间文档又有修改，重新载入已取消。");
+        showNotice("等待写入期间文档又有修改，重新载入已取消。", true);
         return;
       }
     }
@@ -1588,7 +1947,7 @@
       targetPath = targetStatus.path;
       const targetKey = pathKey(targetPath);
       if (tabs.some((other) => other.id !== tab.id && pathKey(other.path) === targetKey)) {
-        showNotice("目标文件已在另一个标签中打开");
+        showNotice("目标文件已在另一个标签中打开", true);
         return false;
       }
 
@@ -1600,9 +1959,11 @@
         encoding = forcedEncoding ?? tab.encoding;
         expectedVersion = targetStatus.version;
         if (expectedVersion) {
-          const overwrite = await confirm("目标文件已存在。是否覆盖？", {
+          const overwrite = await requestConfirmation({
             title: "覆盖现有文件？",
-            kind: "warning",
+            message: `“${targetPath}”已存在。覆盖后会替换该文件的内容。`,
+            confirmLabel: "覆盖文件",
+            tone: "danger",
           });
           if (!overwrite) return false;
         }
@@ -1612,9 +1973,11 @@
     const editorStateToSave = tab.editorState;
     const sourceToSave = sourceForTab(tab);
     if (!saveAs && tab.path && tab.savedSource.length > 0 && sourceToSave.length === 0) {
-      const confirmed = await confirm("当前内容为空，保存会清空原文件。确定继续吗？", {
+      const confirmed = await requestConfirmation({
         title: "清空文档？",
-        kind: "warning",
+        message: `当前内容为空。保存将清空“${tab.name}”的现有内容。`,
+        confirmLabel: "保存空文档",
+        tone: "danger",
       });
       if (!confirmed) return false;
     }
@@ -1632,9 +1995,11 @@
     } catch (error) {
       const message = displayError(error, "无法写入文件，请检查文件权限和磁盘空间后重试。");
       if (message.includes("无法表示新增字符")) {
-        const convert = await confirm("当前编码无法保存新增字符。是否改用 UTF-8 保存？", {
+        const convert = await requestConfirmation({
           title: "转换为 UTF-8？",
-          kind: "warning",
+          message: `当前编码无法保存“${tab.name}”中的新增字符。改用 UTF-8 后会保留文字内容。`,
+          confirmLabel: "使用 UTF-8 保存",
+          tone: "primary",
         });
         if (!convert) return false;
         try {
@@ -1661,7 +2026,7 @@
       }
     }
 
-    const previewPathChanged = pathKey(tab.path) !== pathKey(result.path);
+    const documentPathChanged = pathKey(tab.path) !== pathKey(result.path);
     const previousId = tab.id;
     const nextId = pathKey(result.path);
     tab.id = nextId;
@@ -1681,20 +2046,20 @@
     rememberFile(result.path, result.name);
     persistDraftRecovery();
     scheduleSessionSave();
-    if (previewPathChanged && tab.editing && tab.editorState) {
-      scheduleEditorPreview(tab, tab.editorState);
-    } else if (previewPathChanged) {
-      const previewGeneration = ++tab.previewGeneration;
+    if (documentPathChanged && !tab.editing) {
+      const renderGeneration = ++tab.renderGeneration;
       void renderMarkdown(sourceToSave, loadDocumentImage(result.path))
         .then(async (rendered) => {
           if (
             !tabs.includes(tab) ||
             tab.editing ||
             tab.path !== result.path ||
-            tab.previewGeneration !== previewGeneration
+            tab.renderGeneration !== renderGeneration
           ) return;
           tab.html = rendered.html;
           tab.headings = rendered.headings;
+          tab.renderedSource = sourceToSave;
+          tab.renderedPath = result.path;
           if (activeTabId === tab.id) {
             activeHeadingId = rendered.headings[0]?.id ?? null;
             await tick();
@@ -1703,7 +2068,7 @@
         })
         .catch(() => {
           if (activeTabId === tab.id && !tab.editing) {
-            showNotice("另存为后无法更新本地图片预览。");
+            showNotice("另存为后无法更新本地图片。");
           }
         });
     }
@@ -1740,7 +2105,6 @@
     if (!tab) return;
     tab.editorScrollTop = Math.max(0, scrollTop);
     tab.editorScrollProgress = Math.min(1, Math.max(0, progress));
-    if (tab.id === activeTabId && tab.editing) setReaderScrollProgress(tab.editorScrollProgress);
   }
 
   function handleEditorStateChange(
@@ -1760,67 +2124,48 @@
         tab.draftUpdatedAt = Date.now();
         scheduleDraftRecovery();
       }
-      if (tab.editing) scheduleEditorPreview(tab, editorState);
+      if (tab.editing) scheduleEditorOutlineUpdate(tab, editorState);
     }
   }
 
-  function scheduleEditorPreview(tab: ReaderTab, editorState: EditorState) {
-    const previewKey = tab.editorInstanceId;
-    const previousTimer = editorPreviewTimers.get(previewKey);
+  function scheduleEditorOutlineUpdate(tab: ReaderTab, editorState: EditorState) {
+    const outlineKey = tab.editorInstanceId;
+    const previousTimer = editorOutlineTimers.get(outlineKey);
     if (previousTimer) clearTimeout(previousTimer);
-    tab.previewedEditorDoc = null;
-    tab.previewedEditorPath = null;
-    const generation = ++tab.livePreviewGeneration;
-    const documentPath = tab.path;
     const timer = setTimeout(() => {
-      if (editorPreviewTimers.get(previewKey) === timer) editorPreviewTimers.delete(previewKey);
+      if (editorOutlineTimers.get(outlineKey) === timer) editorOutlineTimers.delete(outlineKey);
       if (
         !tabs.includes(tab) ||
         !tab.editing ||
-        tab.editorState?.doc !== editorState.doc ||
-        tab.path !== documentPath
+        tab.editorState?.doc !== editorState.doc
       ) return;
 
       const source = sourceForTab(tab);
-      void renderMarkdown(source, (imageSource) =>
-        invoke<string>("read_local_image", {
-          documentPath,
-          source: imageSource,
-        }),
-      )
-        .then(async (rendered) => {
+      void loadMarkdownModule()
+        .then((markdown) => {
           if (
-            generation !== tab.livePreviewGeneration ||
             !tabs.includes(tab) ||
             !tab.editing ||
-            tab.editorState?.doc !== editorState.doc ||
-            tab.path !== documentPath
+            tab.editorState?.doc !== editorState.doc
           ) return;
-          tab.html = rendered.html;
-          tab.headings = rendered.headings;
-          tab.previewedEditorDoc = editorState.doc;
-          tab.previewedEditorPath = documentPath;
-          if (activeTabId === tab.id) {
-            await tick();
-            if (activeTabId !== tab.id || tab.editorState !== editorState) return;
-            setReaderScrollProgress(tab.editorScrollProgress);
-            syncActiveHeading();
+          tab.headings = markdown.extractDocumentHeadings(source);
+          const currentEditorState = tab.editorState;
+          if (currentEditorState && activeTabId === tab.id) {
+            const cursor = currentEditorState.selection.main.head;
+            const line = currentEditorState.doc.lineAt(cursor).number - 1;
+            handleEditorCursorChange(tab.editorInstanceId, cursor, line);
           }
         })
-        .catch(() => {
-          if (generation === tab.livePreviewGeneration && activeTabId === tab.id) {
-            showNotice("预览更新失败，编辑内容仍保留。");
-          }
-        });
-    }, 420);
-    editorPreviewTimers.set(previewKey, timer);
+        .catch(() => {});
+    }, 180);
+    editorOutlineTimers.set(outlineKey, timer);
   }
 
   async function toggleEditing() {
     const tab = activeTab;
     if (!tab || tab.loading || tab.error) return;
     if (!tab.editing) {
-      tab.previewGeneration += 1;
+      tab.renderGeneration += 1;
       if (!tab.editorState && readerViewport) {
         const maxScrollTop = readerViewport.scrollHeight - readerViewport.clientHeight;
         tab.editorScrollProgress =
@@ -1829,33 +2174,28 @@
       closeSearch();
       tab.editing = true;
       await tick();
-      if (activeTabId === tab.id && readerViewport) {
-        readerViewport.scrollTop = tab.scrollTop;
-        syncActiveHeading();
-      }
       return;
     }
 
-    const livePreviewTimer = editorPreviewTimers.get(tab.editorInstanceId);
-    if (livePreviewTimer) clearTimeout(livePreviewTimer);
-    editorPreviewTimers.delete(tab.editorInstanceId);
-    if (activeTabId === tab.id && readerViewport) tab.scrollTop = readerViewport.scrollTop;
-    tab.livePreviewGeneration += 1;
-    const previewGeneration = ++tab.previewGeneration;
+    const outlineTimer = editorOutlineTimers.get(tab.editorInstanceId);
+    if (outlineTimer) clearTimeout(outlineTimer);
+    editorOutlineTimers.delete(tab.editorInstanceId);
+    const renderGeneration = ++tab.renderGeneration;
+    const isCurrentRender = () =>
+      tab.renderGeneration === renderGeneration &&
+      tabs.includes(tab) &&
+      !tab.loading &&
+      tab.editing;
+    const source = sourceForTab(tab);
 
-    const currentEditorState = tab.editorState;
-    if (
-      currentEditorState &&
-      tab.previewedEditorDoc === currentEditorState.doc &&
-      tab.previewedEditorPath === tab.path
-    ) {
-      tab.source = sourceForTab(tab);
+    if (source === tab.renderedSource && pathKey(tab.path) === pathKey(tab.renderedPath)) {
+      tab.source = source;
       tab.editing = false;
       if (activeTabId === tab.id) {
-        activeHeadingId = tab.headings[0]?.id ?? null;
         await tick();
-        if (activeTabId === tab.id && readerViewport) {
-          readerViewport.scrollTop = tab.scrollTop;
+        if (activeTabId === tab.id && !tab.editing && readerViewport) {
+          setReaderScrollProgress(tab.editorScrollProgress);
+          tab.scrollTop = readerViewport.scrollTop;
           syncActiveHeading();
         }
       }
@@ -1863,72 +2203,54 @@
     }
 
     try {
-      let source: string;
+      let renderedSource = source;
       let rendered: RenderedDocument;
       while (true) {
-        if (
-          tab.previewGeneration !== previewGeneration ||
-          !tabs.includes(tab) ||
-          tab.loading ||
-          !tab.editing
-        ) return;
+        if (!isCurrentRender()) return;
 
         const editorState = tab.editorState;
         const documentPath = tab.path;
-        source = sourceForTab(tab);
-        rendered = await renderMarkdown(source, (imageSource) =>
-          invoke<string>("read_local_image", {
-            documentPath,
-            source: imageSource,
-          }),
-        );
+        renderedSource = sourceForTab(tab);
+        rendered = await renderMarkdown(renderedSource, loadDocumentImage(documentPath));
 
-        if (
-          tab.previewGeneration !== previewGeneration ||
-          !tabs.includes(tab) ||
-          tab.loading ||
-          !tab.editing
-        ) return;
+        if (!isCurrentRender()) return;
         if (tab.editorState === editorState && tab.path === documentPath) break;
       }
 
-      tab.source = source;
+      tab.source = renderedSource;
       tab.html = rendered.html;
       tab.headings = rendered.headings;
-      tab.previewedEditorDoc = tab.editorState?.doc ?? null;
-      tab.previewedEditorPath = tab.path;
+      tab.renderedSource = renderedSource;
+      tab.renderedPath = tab.path;
       tab.editing = false;
       if (activeTabId === tab.id) {
         activeHeadingId = rendered.headings[0]?.id ?? null;
         await tick();
         if (activeTabId === tab.id) {
-          if (readerViewport) readerViewport.scrollTop = tab.scrollTop;
+          setReaderScrollProgress(tab.editorScrollProgress);
+          if (readerViewport) tab.scrollTop = readerViewport.scrollTop;
           syncActiveHeading();
         }
       }
     } catch (error) {
-      if (tab.previewGeneration === previewGeneration) {
-        showNotice("预览失败：" + displayError(error, "当前修改仍保留，请重试。"));
+      if (isCurrentRender()) {
+        showNotice("无法切换到阅读模式：" + displayError(error, "当前修改仍保留，请重试。"));
       }
     }
   }
 
   function cycleTab(direction: number) {
-    if (tabs.length < 2 || !activeTabId) return;
-    const currentIndex = tabs.findIndex((tab) => tab.id === activeTabId);
-    const nextIndex = (currentIndex + direction + tabs.length) % tabs.length;
-    void activateTab(tabs[nextIndex].id);
+    const ids = tabs.map((tab) => tab.id);
+    const currentIndex = ids.indexOf(activeTabId ?? "");
+    if (ids.length < 2 || currentIndex < 0) return;
+    const nextId = ids[(currentIndex + direction + ids.length) % ids.length];
+    void activateTab(nextId);
   }
 
   function handleReaderScroll(event: Event) {
     const viewport = event.currentTarget as HTMLDivElement;
     if (activeTab) {
       activeTab.scrollTop = viewport.scrollTop;
-      if (activeTab.editing) {
-        const maxScrollTop = viewport.scrollHeight - viewport.clientHeight;
-        const progress = maxScrollTop > 0 ? viewport.scrollTop / maxScrollTop : 0;
-        editorComponent?.scrollToProgress(progress);
-      }
     }
     scheduleSessionSave();
     syncActiveHeading();
@@ -1998,6 +2320,13 @@
     if (activeTabId !== expectedTabId) return;
     const expectedTab = tabs.find((tab) => tab.id === expectedTabId);
     if (!expectedTab || expectedTab.editorInstanceId !== expectedEditorInstanceId) return;
+    if (expectedTab.editing) {
+      const heading = expectedTab.headings.find((item) => item.id === id);
+      if (!heading) return;
+      editorComponent?.scrollToLine(heading.line);
+      activeHeadingId = heading.id;
+      return;
+    }
     const element = document.getElementById(id);
     if (!element || !readerContent?.contains(element)) return;
     element.scrollIntoView({ behavior: scrollBehavior(), block: "start" });
@@ -2007,8 +2336,17 @@
   }
 
   function setTheme(value: string) {
-    darkMode = value === "dark";
+    const nextDarkMode = value === "dark";
+    if (nextDarkMode === darkMode) return;
+
+    themeSwitching = true;
+    darkMode = nextDarkMode;
     savePreferences();
+    if (themeSwitchTimer) clearTimeout(themeSwitchTimer);
+    themeSwitchTimer = setTimeout(() => {
+      themeSwitching = false;
+      themeSwitchTimer = undefined;
+    }, 180);
   }
 
   function setReadingLineHeight(value: string) {
@@ -2026,8 +2364,27 @@
   }
 
   function toggleSettings() {
-    settingsOpen = !settingsOpen;
+    if (settingsOpen) {
+      closeSettings();
+      return;
+    }
     openMenu = null;
+    tabContextMenu = null;
+    if (searchOpen) closeSearch();
+    settingsOpen = true;
+    void tick().then(focusSettingsCategory);
+  }
+
+  function focusSettingsCategory() {
+    const target = settingsWorkspace?.querySelector<HTMLElement>(
+      '.settings-nav [role="tab"][aria-selected="true"]',
+    );
+    target?.focus({ preventScroll: true });
+  }
+
+  function closeSettings() {
+    settingsOpen = false;
+    void tick().then(() => document.querySelector<HTMLButtonElement>(".settings-toggle")?.focus());
   }
 
   async function chooseDefaultOpenDirectory() {
@@ -2042,10 +2399,9 @@
   }
 
   async function openDefaultAppsSettings() {
-    settingsOpen = false;
     try {
       await openUrl("ms-settings:defaultapps");
-      showNotice("请在默认应用设置中选择 LeanReader，并关联 .md 和 .markdown 文件。");
+      showNotice("请在默认应用设置中选择 LiteMD，并关联 .md 和 .markdown 文件。");
     } catch {
       showNotice("无法打开系统默认应用设置。");
     }
@@ -2055,6 +2411,12 @@
     const nextFontSize = Math.min(maxFontSize, Math.max(minFontSize, fontSize + amount));
     if (nextFontSize === fontSize) return;
     fontSize = nextFontSize;
+    savePreferences();
+  }
+
+  function resetReadingFontSize() {
+    if (fontSize === defaultFontSize) return;
+    fontSize = defaultFontSize;
     savePreferences();
   }
 
@@ -2077,82 +2439,11 @@
     };
   }
 
-  function toggleEditorWordWrap() {
-    editorWordWrap = !editorWordWrap;
-    savePreferences();
-    openMenu = null;
-    void tick().then(() => editorComponent?.focusEditor());
-  }
-
   function setEditorIndentWidth(width: 2 | 4 | 8) {
     editorIndentWidth = width;
     savePreferences();
     openMenu = null;
-    void tick().then(() => editorComponent?.focusEditor());
-  }
-
-  function beginEditorSplitResize(event: PointerEvent) {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    const splitter = event.currentTarget as HTMLElement;
-    const bounds = editorSplitElement?.getBoundingClientRect();
-    const splitterWidth = splitter.offsetWidth;
-    const availableWidth = (bounds?.width ?? 0) - splitterWidth;
-    if (!bounds || availableWidth <= 0) return;
-    editorSplitResizeBounds = { left: bounds.left, splitterWidth, availableWidth };
-    splitter.setPointerCapture(event.pointerId);
-  }
-
-  function resizeEditorSplit(event: PointerEvent) {
-    const splitter = event.currentTarget as HTMLElement;
-    const bounds = editorSplitResizeBounds;
-    if (!splitter.hasPointerCapture(event.pointerId) || !bounds) return;
-    editorSplitRatio = Math.min(
-      maxEditorSplitRatio,
-      Math.max(
-        minEditorSplitRatio,
-        (event.clientX - bounds.left - bounds.splitterWidth / 2) / bounds.availableWidth,
-      ),
-    );
-  }
-
-  function finishEditorSplitResize(event: PointerEvent) {
-    const splitter = event.currentTarget as HTMLElement;
-    if (splitter.hasPointerCapture(event.pointerId)) {
-      resizeEditorSplit(event);
-      splitter.releasePointerCapture(event.pointerId);
-      editorSplitResizeBounds = null;
-      savePreferences();
-    } else {
-      editorSplitResizeBounds = null;
-    }
-  }
-
-  function handleEditorSplitKeydown(event: KeyboardEvent) {
-    let nextRatio: number | null = null;
-    if (event.key === "ArrowLeft") nextRatio = editorSplitRatio - 0.02;
-    else if (event.key === "ArrowRight") nextRatio = editorSplitRatio + 0.02;
-    else if (event.key === "Home") nextRatio = minEditorSplitRatio;
-    else if (event.key === "End") nextRatio = maxEditorSplitRatio;
-    else return;
-    event.preventDefault();
-    editorSplitRatio = Math.min(
-      maxEditorSplitRatio,
-      Math.max(minEditorSplitRatio, nextRatio),
-    );
-    savePreferences();
-  }
-
-  async function toggleEditorPreview() {
-    editorPreviewVisible = !editorPreviewVisible;
-    savePreferences();
-    if (!editorPreviewVisible) return;
-
-    const tabId = activeTabId;
-    await tick();
-    if (activeTabId === tabId && activeTab?.editing) {
-      setReaderScrollProgress(activeTab.editorScrollProgress);
-    }
+    if (!settingsOpen) void tick().then(() => editorComponent?.focusEditor());
   }
 
   function beginOutlineResize(event: PointerEvent) {
@@ -2190,8 +2481,9 @@
 
   function handleOutlineResizeKeydown(event: KeyboardEvent) {
     let nextWidth: number | null = null;
-    if (event.key === "ArrowLeft") nextWidth = outlineWidth - 16;
-    else if (event.key === "ArrowRight") nextWidth = outlineWidth + 16;
+    const step = event.shiftKey ? 24 : 8;
+    if (event.key === "ArrowLeft") nextWidth = visibleOutlineWidth - step;
+    else if (event.key === "ArrowRight") nextWidth = visibleOutlineWidth + step;
     else if (event.key === "Home") nextWidth = minOutlineWidth;
     else if (event.key === "End") nextWidth = maxOutlineWidth;
     else return;
@@ -2209,11 +2501,20 @@
     searchInput?.select();
   }
 
+  function toggleReaderSearch() {
+    if (searchOpen) closeSearch();
+    else void showSearch();
+  }
+
   function closeSearch() {
+    const restoreFocus = searchOpen;
     searchOpen = false;
     searchQuery = "";
     searchCount = 0;
     activeSearchIndex = 0;
+    if (restoreFocus) {
+      void tick().then(() => readerViewport?.focus({ preventScroll: true }));
+    }
   }
 
   function clearSearchHighlights() {
@@ -2326,6 +2627,45 @@
     });
   });
 
+  function closeImagePreview() {
+    const trigger = imageZoomTrigger;
+    zoomedImage = null;
+    imageZoomTrigger = null;
+    void tick().then(() => {
+      if (trigger?.isConnected) {
+        trigger.tabIndex = -1;
+        trigger.focus({ preventScroll: true });
+      }
+    });
+  }
+
+  function handleImagePreviewKeydown(event: KeyboardEvent) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeImagePreview();
+    } else if (event.key === "Tab") {
+      const preview = event.currentTarget as HTMLElement;
+      const focusable = Array.from(
+        preview.querySelectorAll<HTMLButtonElement>("button:not([disabled])"),
+      );
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable.at(-1)!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+  }
+
+  function handleImagePreviewClick(event: MouseEvent) {
+    if (event.target === event.currentTarget) closeImagePreview();
+  }
+
   async function handleReaderClick(event: MouseEvent) {
     const target = event.target;
     if (!(target instanceof Element)) return;
@@ -2359,7 +2699,10 @@
     const image = target.closest<HTMLImageElement>("img");
     if (image && !image.closest("a")) {
       event.preventDefault();
+      image.tabIndex = -1;
+      imageZoomTrigger = image;
       zoomedImage = { src: image.currentSrc || image.src, alt: image.alt };
+      void tick().then(() => imageZoomClose?.focus());
       return;
     }
     const anchor = target.closest("a");
@@ -2435,49 +2778,120 @@
     };
   }
 
+  function getWindowResizeDirection(event: PointerEvent): WindowResizeDirection | null {
+    if (!isTauri() || windowMaximized) return null;
+    const target = event.target;
+    if (
+      target instanceof Element &&
+      target.closest("button, input, select, textarea, [contenteditable='true']")
+    ) {
+      return null;
+    }
+
+    const north = event.clientY <= windowResizeEdgeSize;
+    const south = event.clientY >= window.innerHeight - windowResizeEdgeSize;
+    const west = event.clientX <= windowResizeEdgeSize;
+    const east = event.clientX >= window.innerWidth - windowResizeEdgeSize;
+
+    if (north && west) return "NorthWest";
+    if (north && east) return "NorthEast";
+    if (south && west) return "SouthWest";
+    if (south && east) return "SouthEast";
+    if (north) return "North";
+    if (south) return "South";
+    if (west) return "West";
+    if (east) return "East";
+    return null;
+  }
+
+  function handleWindowResizePointerMove(event: PointerEvent) {
+    resizeDirection = getWindowResizeDirection(event);
+  }
+
+  function clearWindowResizeDirection() {
+    resizeDirection = null;
+  }
+
   function handleOuterPointerDown(event: PointerEvent) {
     const target = event.target;
+    if (
+      target instanceof Element &&
+      target.closest(".modal-backdrop, .image-zoom-backdrop")
+    ) {
+      return;
+    }
+
+    if (event.button === 0) {
+      const direction = getWindowResizeDirection(event);
+      if (direction) {
+        event.preventDefault();
+        event.stopPropagation();
+        void getCurrentWindow().startResizeDragging(direction).catch((error) => {
+          resizeDirection = null;
+          showNotice("无法调整窗口大小：" + displayError(error, "请稍后重试。"));
+        });
+        return;
+      }
+    }
+
+    if (notice && !noticePersistent && target instanceof Element && !target.closest(".notice")) {
+      dismissNotice(false);
+    }
     if (target instanceof Element && !target.closest(".menu-wrap")) {
       openMenu = null;
     }
     if (target instanceof Element && !target.closest(".tab-context-menu")) {
       tabContextMenu = null;
     }
-    if (target instanceof Element && !target.closest(".settings-panel, .settings-toggle")) {
-      settingsOpen = false;
-    }
+    if (settingsOpen) return;
   }
 
-  function handleSettingsKeydown(event: KeyboardEvent) {
-    if (event.key !== "Escape" || !settingsOpen) return;
+  function handleSettingsTabKeydown(event: KeyboardEvent) {
+    const direction = event.key === "ArrowDown" || event.key === "ArrowRight"
+      ? 1
+      : event.key === "ArrowUp" || event.key === "ArrowLeft"
+        ? -1
+        : 0;
+    if (direction === 0 && event.key !== "Home" && event.key !== "End") return;
+    const tabs = Array.from(settingsWorkspace?.querySelectorAll<HTMLButtonElement>('[role="tab"]') ?? []);
+    if (!tabs.length) return;
     event.preventDefault();
-    event.stopPropagation();
-    settingsOpen = false;
-    document.querySelector<HTMLButtonElement>(".settings-toggle")?.focus();
+    const currentIndex = Math.max(0, tabs.indexOf(event.currentTarget as HTMLButtonElement));
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? tabs.length - 1
+        : (currentIndex + direction + tabs.length) % tabs.length;
+    tabs[nextIndex].focus();
+    tabs[nextIndex].click();
   }
 
-  function toggleMenu(menu: "file" | "recent" | "view" | "insert") {
+  function toggleMenu(menu: "file" | "recent" | "tabs") {
     if (openMenu === menu) {
       openMenu = null;
+      hoveredRecentPath = null;
+      focusedRecentPath = null;
       return;
     }
 
+    if (activeTab?.editing) editorComponent?.closeSearch();
+    hoveredRecentPath = null;
+    focusedRecentPath = null;
     openMenu = menu;
     void tick().then(() => {
-      document.querySelector<HTMLElement>(".dropdown-menu [role^='menuitem']:not([disabled])")?.focus();
+      document
+        .querySelector<HTMLElement>(
+          ".dropdown-menu [role^='menuitem']:not([disabled]):not([aria-hidden='true'])",
+        )
+        ?.focus();
     });
-  }
-
-  function insertMarkdown(action: "bold" | "italic" | "inlineCode" | "codeBlock" | "link") {
-    openMenu = null;
-    editorComponent?.insertMarkdown(action);
   }
 
   function handleMenuKeydown(event: KeyboardEvent) {
     const menu = event.currentTarget as HTMLElement;
     const items = Array.from(
       menu.querySelectorAll<HTMLElement>(
-        "[role='menuitem']:not([disabled]),[role='menuitemcheckbox']:not([disabled]),[role='menuitemradio']:not([disabled])",
+        "[role='menuitem']:not([disabled]):not([aria-hidden='true']),[role='menuitemcheckbox']:not([disabled]):not([aria-hidden='true']),[role='menuitemradio']:not([disabled]):not([aria-hidden='true'])",
       ),
     );
     if (!items.length) return;
@@ -2518,20 +2932,21 @@
       return;
     }
 
-    const currentIndex = tabs.findIndex((tab) => tab.id === tabId);
+    const ids = tabs.map((tab) => tab.id);
+    const currentIndex = ids.indexOf(tabId);
     if (currentIndex < 0) return;
 
     let nextIndex = currentIndex;
-    if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
-    else if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % tabs.length;
+    if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + ids.length) % ids.length;
+    else if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % ids.length;
     else if (event.key === "Home") nextIndex = 0;
-    else if (event.key === "End") nextIndex = tabs.length - 1;
+    else if (event.key === "End") nextIndex = ids.length - 1;
     else return;
 
     event.preventDefault();
-    const nextId = tabs[nextIndex].id;
+    const nextId = ids[nextIndex];
     void activateTab(nextId).then(() => {
-      document.querySelectorAll<HTMLButtonElement>("[role='tab']")[nextIndex]?.focus();
+      focusTabButton(nextId);
     });
   }
 
@@ -2539,8 +2954,17 @@
     await getCurrentWindow().minimize();
   }
 
+  async function syncMaximizedState() {
+    try {
+      windowMaximized = await getCurrentWindow().isMaximized();
+    } catch {
+      // 浏览器预览不提供原生窗口状态
+    }
+  }
+
   async function toggleMaximizeWindow() {
     await getCurrentWindow().toggleMaximize();
+    await syncMaximizedState();
   }
 
   async function closeWindow() {
@@ -2553,49 +2977,48 @@
 </script>
 
 <svelte:head>
-  <title>LeanReader</title>
+  <title>LiteMD</title>
 </svelte:head>
 
-<main
-  class="app-shell"
-  class:dark={darkMode}
-  class:home-state={!activeTab}
-  style={`--reader-line-height:${lineHeight}`}
-  onpointerdown={handleOuterPointerDown}
->
-  <header class="titlebar">
-    {#if tabs.length === 0}
-      <div class="brand-lockup drag-region" data-tauri-drag-region>
-        <span class="brand-mark"><BookOpen size={18} strokeWidth={2.2} /></span>
-        <span class="brand-name">LeanReader</span>
-      </div>
-    {/if}
-    <div class="tab-strip" bind:this={tabStripElement}>
-      <div class="tab-list" role="tablist" aria-label="已打开的文档">
+{#snippet noticeContents()}
+  <span>{notice}</span>
+  <button aria-label="关闭提示" title="关闭提示" onclick={() => dismissNotice()}><X size={16} /></button>
+{/snippet}
+
+{#snippet documentTabs()}
+    <div class="tab-strip drag-region" data-tauri-drag-region bind:this={tabStripContainerElement}>
+      <div class="tab-scroll-area" bind:this={tabStripElement}>
+      <div class="tab-list" role="tablist" aria-label="工作区标签" bind:this={tabListElement}>
         {#each tabs as tab (tab.id)}
+          {@const directoryHint = tabDirectoryHint(tab)}
           <div
             class="tab-shell"
-            class:selected={tab.id === activeTabId}
+            class:selected={tab.id === activeTabId && !settingsOpen}
             class:modified={isDirty(tab)}
+            class:drop-before={dropTargetTabId === tab.id && dropTargetSide === "before"}
+            class:drop-after={dropTargetTabId === tab.id && dropTargetSide === "after"}
           >
             <button
               class="tab-button"
               role="tab"
               data-tab-id={tab.id}
               draggable="true"
-              aria-selected={tab.id === activeTabId}
-              tabindex={tab.id === activeTabId ? 0 : -1}
+              aria-selected={tab.id === activeTabId && !settingsOpen}
+              tabindex={tab.id === focusableTabId ? 0 : -1}
               title={tab.path ? displayPath(tab.path) : tab.name}
               onclick={() => void activateTab(tab.id)}
               onkeydown={(event) => handleTabKeydown(event, tab.id)}
               oncontextmenu={(event) => showTabContextMenu(event, tab.id)}
               ondragstart={(event) => handleTabDragStart(event, tab.id)}
-              ondragover={handleTabDragOver}
+              ondragover={(event) => handleTabDragOver(event, tab.id)}
               ondrop={(event) => handleTabDrop(event, tab.id)}
-              ondragend={() => (draggedTabId = null)}
+              ondragend={clearTabDragState}
             >
               <FileText size={16} strokeWidth={1.8} />
-              <span class="tab-name">{tab.name}</span>
+              <span class="tab-copy" class:has-directory-hint={directoryHint !== null}>
+                <span class="tab-name">{tab.name}</span>
+                {#if directoryHint}<span class="tab-directory-hint">· {directoryHint}</span>{/if}
+              </span>
               {#if isDirty(tab)}<span class="dirty-indicator" aria-label="有未保存的修改"></span>{/if}
               {#if tab.externalChange}<span class="external-indicator" aria-label="文件在外部发生变化"></span>{/if}
               {#if tab.loading}<span class="tab-loading" aria-label="正在读取"></span>{/if}
@@ -2611,152 +3034,90 @@
           </div>
         {/each}
       </div>
-    </div>
-    <button
-      class="home-page-button"
-      aria-label="首页"
-      title="返回首页"
-      onclick={showHomePage}
-    >
-      <House size={17} strokeWidth={1.8} />
-    </button>
-    <div class="tab-drag-space drag-region" data-tauri-drag-region></div>
-
-    <div class="titlebar-actions">
-      <button
-        class="titlebar-action settings-toggle"
-        aria-label="设置"
-        title="设置"
-        aria-haspopup="dialog"
-        aria-controls="settings-panel"
-        aria-expanded={settingsOpen}
-        onclick={toggleSettings}
-        onkeydown={handleSettingsKeydown}
-      >
-        <Settings size={19} strokeWidth={1.8} />
-      </button>
-      <span class="titlebar-divider" aria-hidden="true"></span>
-    </div>
-
-    <div class="window-controls">
-      <button aria-label="最小化" title="最小化" onclick={() => void minimizeWindow()}>
-        <Minus size={16} />
-      </button>
-      <button aria-label="最大化或还原" title="最大化或还原" onclick={() => void toggleMaximizeWindow()}>
-        <Square size={12} />
-      </button>
-      <button class="close-window" aria-label="关闭窗口" title="关闭窗口" onclick={() => void closeWindow()}>
-        <X size={16} />
-      </button>
-    </div>
-  </header>
-
-  {#if settingsOpen}
-    <div
-      class="settings-panel"
-      id="settings-panel"
-      role="dialog"
-      aria-labelledby="settings-title"
-      tabindex="-1"
-      transition:popupTransition={{ duration: 150, start: 0.97 }}
-      onkeydown={handleSettingsKeydown}
-    >
-      <h2 id="settings-title">设置</h2>
-
-      <section class="settings-section">
-        <h3>阅读外观</h3>
-        <label class="settings-row">
-          <span>主题</span>
-          <select value={darkMode ? "dark" : "light"} onchange={(event) => setTheme(event.currentTarget.value)}>
-            <option value="light">浅色</option>
-            <option value="dark">深色</option>
-          </select>
-        </label>
-        <label class="settings-row">
-          <span>字体大小</span>
-          <select value={fontSize} onchange={(event) => setReadingFontSize(event.currentTarget.value)}>
-            {#each Array.from({ length: maxFontSize - minFontSize + 1 }, (_, index) => minFontSize + index) as size (size)}
-              <option value={size}>{size}</option>
-            {/each}
-          </select>
-        </label>
-        <label class="settings-row">
-          <span>行距</span>
-          <select value={lineHeight} onchange={(event) => setReadingLineHeight(event.currentTarget.value)}>
-            <option value={1.6}>紧凑</option>
-            <option value={1.8}>标准</option>
-            <option value={2}>宽松</option>
-          </select>
-        </label>
-      </section>
-
-      <section class="settings-section">
-        <h3>阅读行为</h3>
-        <label class="settings-row settings-switch-row">
-          <span>启动时恢复上次文件</span>
-          <input
-            type="checkbox"
-            checked={restoreLastSession}
-            onchange={(event) => { restoreLastSession = event.currentTarget.checked; savePreferences(); }}
-          />
-        </label>
-      </section>
-
-      <section class="settings-section settings-file-section">
-        <h3>文件</h3>
-        <div class="settings-row">
-          <span>默认打开目录</span>
+      </div>
+      {#if hasTabOverflow}
+        <div class="menu-wrap tab-overflow-wrap">
           <button
-            class="settings-button"
-            title={defaultOpenDirectory || "选择默认文件夹"}
-            onclick={() => void chooseDefaultOpenDirectory()}
-          >选择文件夹</button>
+            class="menu-trigger tab-overflow-trigger"
+            data-menu-trigger="tabs"
+            aria-label="显示所有标签"
+            title="显示所有标签"
+            aria-haspopup="menu"
+            aria-expanded={openMenu === "tabs"}
+            onclick={() => toggleMenu("tabs")}
+          >
+            <ChevronDown size={16} />
+          </button>
+          {#if openMenu === "tabs"}
+            <div
+              class="dropdown-menu tab-overflow-menu"
+              role="menu"
+              aria-label="所有工作区标签"
+              tabindex="-1"
+              transition:popupTransition={{ duration: 150 }}
+              onkeydown={handleMenuKeydown}
+            >
+              <span class="menu-label">工作区标签</span>
+              {#each tabs as tab (tab.id)}
+                <button
+                  class="tab-overflow-item"
+                  role="menuitem"
+                  aria-current={tab.id === activeTabId && !settingsOpen ? "page" : undefined}
+                  title={tab.path ? displayPath(tab.path) : tab.name}
+                  onclick={() => { void activateTab(tab.id).then(() => focusTabButton(tab.id)); }}
+                >
+                  <FileText size={16} strokeWidth={1.8} />
+                  <span class="tab-overflow-copy">
+                    <span class="tab-overflow-title-line">
+                      <span class="tab-overflow-name">{tab.name}</span>
+                      {#if tab.loading || tab.error || isDirty(tab) || tab.externalChange}
+                        <span class="tab-overflow-status">
+                          {#if tab.loading}正在读取{/if}
+                          {#if tab.error}{tab.loading ? " · " : ""}打开失败{/if}
+                          {#if isDirty(tab)}{tab.loading || tab.error ? " · " : ""}未保存{/if}
+                          {#if tab.externalChange === "modified"}{tab.loading || tab.error || isDirty(tab) ? " · " : ""}外部已修改{/if}
+                          {#if tab.externalChange === "missing"}{tab.loading || tab.error || isDirty(tab) ? " · " : ""}文件不可用{/if}
+                        </span>
+                      {/if}
+                    </span>
+                    <span class="tab-overflow-path">
+                      {#if tab.path}<bdi>{displayPath(tab.path)}</bdi>{:else}未保存文档{/if}
+                    </span>
+                  </span>
+                </button>
+              {/each}
+            </div>
+          {/if}
         </div>
-        <div class="settings-row settings-association-row">
-          <div class="settings-copy">
-            <span>Markdown 文件</span>
-            <small>支持 .md、.markdown</small>
-          </div>
-          <button class="settings-button" onclick={() => void openDefaultAppsSettings()}>设为默认</button>
-        </div>
-      </section>
-
-      <section class="settings-section settings-about">
-        <h3>关于</h3>
-        <div class="settings-row">
-          <span>LeanReader</span>
-          <small>版本 {appVersion}</small>
-        </div>
-      </section>
-    </div>
-  {/if}
-
-  {#if tabContextMenu}
-    <div
-      class="tab-context-menu"
-      role="menu"
-      tabindex="-1"
-      style={`left:${tabContextMenu.x}px;top:${tabContextMenu.y}px`}
-      transition:popupTransition={{ duration: 150, start: 0.97 }}
-      onkeydown={handleMenuKeydown}
-    >
-      <button role="menuitem" onclick={() => { const id = tabContextMenu?.tabId; tabContextMenu = null; if (id) closeTab(id); }}>关闭标签</button>
-      <button role="menuitem" onclick={() => { const id = tabContextMenu?.tabId; tabContextMenu = null; if (id) requestCloseTabs(tabs.filter((tab) => tab.id !== id).map((tab) => tab.id)); }}>关闭其他标签</button>
-      {#if tabs.find((tab) => tab.id === tabContextMenu?.tabId)?.path}
-        <div class="menu-divider"></div>
-        <button role="menuitem" onclick={() => { const id = tabContextMenu?.tabId; if (id) void copyTabPath(id); }}>复制文件路径</button>
       {/if}
     </div>
-  {/if}
-
-  <nav class="toolbar" aria-label="阅读工具">
+{/snippet}
+<main
+  class="app-shell"
+  class:dark={darkMode}
+  class:theme-switching={themeSwitching}
+  class:no-document-state={!activeTab}
+  class:with-workspace-tabs={tabs.length > 0}
+  class:settings-open={settingsOpen}
+  class:has-modal={pendingCloseIds.length > 0 || pendingConfirmation !== null}
+  class:window-inactive={!windowFocused}
+  class:window-resize-hover={resizeDirection !== null}
+  style={`--reader-line-height:${lineHeight};--window-resize-cursor:${resizeDirection ? windowResizeCursorByDirection[resizeDirection] : "auto"}`}
+  use:tooltipLayer
+  onpointerdown={handleOuterPointerDown}
+  onpointermove={handleWindowResizePointerMove}
+  onpointerleave={clearWindowResizeDirection}
+>
+  <header class="titlebar">
+  <nav class="toolbar" aria-label="应用工具栏">
     <div class="toolbar-left">
       <div class="menu-wrap">
-        <button class="menu-trigger" aria-haspopup="menu" aria-expanded={openMenu === "file"} onclick={() => toggleMenu("file")}>
-          文件 <ChevronDown size={14} />
+        <button class="menu-trigger" data-menu-trigger="file" aria-haspopup="menu" aria-expanded={openMenu === "file"} onclick={() => toggleMenu("file")}>
+          <FileText size={16} strokeWidth={1.8} aria-hidden="true" />
+          <span>文件</span>
         </button>
         {#if openMenu === "file"}
-          <div class="dropdown-menu" role="menu" tabindex="-1" transition:popupTransition={{ duration: 150, start: 0.97 }} onkeydown={handleMenuKeydown}>
+          <div class="dropdown-menu" role="menu" tabindex="-1" transition:popupTransition={{ duration: 150 }} onkeydown={handleMenuKeydown}>
             <button role="menuitem" onclick={() => void openFiles()}>
               <FolderOpen size={16} /> <span>打开文件…</span><kbd>Ctrl+O</kbd>
             </button>
@@ -2764,6 +3125,7 @@
               <Plus size={16} /> <span>新建文件</span><kbd>Ctrl+N</kbd>
             </button>
             {#if activeTab && !activeTab.loading && !activeTab.error}
+              <div class="menu-divider"></div>
               <button role="menuitem" onclick={() => { openMenu = null; void saveActiveTab(); }}>
                 <Save size={16} /> <span>保存</span><kbd>Ctrl+S</kbd>
               </button>
@@ -2789,145 +3151,378 @@
       </div>
 
       <div class="menu-wrap">
-        <button class="menu-trigger" aria-haspopup="menu" aria-expanded={openMenu === "recent"} onclick={() => toggleMenu("recent")}>
-          最近 <ChevronDown size={14} />
+        <button
+          class="menu-trigger"
+          data-menu-trigger="recent"
+          aria-haspopup="menu"
+          aria-expanded={openMenu === "recent"}
+          onclick={() => toggleMenu("recent")}
+        >
+          <History size={16} strokeWidth={1.8} aria-hidden="true" />
+          <span>最近</span>
         </button>
         {#if openMenu === "recent"}
-          <div class="dropdown-menu" role="menu" tabindex="-1" transition:popupTransition={{ duration: 150, start: 0.97 }} onkeydown={handleMenuKeydown}>
+          <div class="dropdown-menu" role="menu" tabindex="-1" transition:popupTransition={{ duration: 150 }} onkeydown={handleMenuKeydown}>
+            <span class="menu-label">最近打开</span>
             {#if recentFiles.length}
-              <span class="menu-label">最近打开</span>
-              {#each recentFiles.slice(0, maxRecentFiles) as file (file.path)}
-                <button role="menuitem" class="recent-menu-item" title={displayPath(file.path)} onclick={() => { openMenu = null; void openPath(file.path); }}>
-                  <FileText size={16} /><span>{file.name}</span>
-                </button>
+              {#each recentFiles.slice(0, maxRecentFiles) as file, index (file.path)}
+                <div
+                  class="recent-menu-row"
+                  role="none"
+                  onpointerenter={() => { hoveredRecentPath = file.path; }}
+                  onpointerleave={() => { if (hoveredRecentPath === file.path) hoveredRecentPath = null; }}
+                  onfocusin={() => { focusedRecentPath = file.path; }}
+                  onfocusout={(event) => clearRecentRowFocus(file.path, event)}
+                >
+                  <button
+                    role="menuitem"
+                    class="recent-menu-item"
+                    data-recent-open-index={index}
+                    title={displayPath(file.path)}
+                    onclick={() => { openMenu = null; void openPath(file.path); }}
+                  >
+                    <FileText size={16} /><span class="recent-menu-copy"><span class="recent-menu-name">{file.name}</span><span class="recent-menu-path"><bdi dir="ltr">{recentDirectoryLabel(file)}</bdi></span></span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    class="recent-menu-remove"
+                    aria-label={"从最近记录移除 " + displayPath(file.path)}
+                    title="从最近记录移除"
+                    aria-hidden={!isRecentRemoveVisible(file.path)}
+                    tabindex={isRecentRemoveVisible(file.path) ? 0 : -1}
+                    onclick={(event) => { event.stopPropagation(); removeRecentFile(file.path, index); }}
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
               {/each}
-              <div class="menu-divider"></div>
               <button role="menuitem" class="muted-menu-item" onclick={clearRecentFiles}>
-                <Trash2 size={16} /><span>清空最近记录</span>
+                <Trash2 size={16} /><span>清空记录</span>
               </button>
             {:else}
-              <span class="menu-label">暂无最近文件</span>
+              <div class="recent-menu-empty" role="status">暂无最近打开的文档</div>
+              <button role="menuitem" onclick={() => void openFiles()}>
+                <FolderOpen size={16} /><span>打开文件…</span><kbd>Ctrl+O</kbd>
+              </button>
             {/if}
           </div>
         {/if}
       </div>
-
-      <div class="menu-wrap">
-        <button class="menu-trigger" aria-haspopup="menu" aria-expanded={openMenu === "view"} onclick={() => toggleMenu("view")}>
-          查看 <ChevronDown size={14} />
-        </button>
-        {#if openMenu === "view"}
-          <div class="dropdown-menu" role="menu" tabindex="-1" transition:popupTransition={{ duration: 150, start: 0.97 }} onkeydown={handleMenuKeydown}>
-            <button role="menuitem" disabled={fontSize >= maxFontSize} onclick={() => { changeFontSize(1); openMenu = null; }}><Plus size={16} /><span>增加字号</span><kbd>Ctrl++</kbd></button>
-            <button role="menuitem" disabled={fontSize <= minFontSize} onclick={() => { changeFontSize(-1); openMenu = null; }}><Minus size={16} /><span>减少字号</span><kbd>Ctrl+-</kbd></button>
-            <button role="menuitem" title="按住 Ctrl 并滚动鼠标滚轮可调整字号（15–25）" onclick={() => { fontSize = defaultFontSize; savePreferences(); openMenu = null; }}><RotateCcw size={16} /><span>恢复字号</span><kbd>Ctrl+0</kbd></button>
-            {#if activeTab?.editing}
-              <div class="menu-divider"></div>
-              <span class="menu-label">编辑器</span>
-              <button role="menuitemcheckbox" aria-checked={editorWordWrap} onclick={toggleEditorWordWrap}>
-                <TextWrap size={16} /><span>自动换行</span><kbd>{editorWordWrap ? "开" : "关"}</kbd>
-              </button>
-              <span class="menu-label">缩进宽度</span>
-              {#each editorIndentWidths as width}
-                <button role="menuitemradio" aria-checked={editorIndentWidth === width} onclick={() => setEditorIndentWidth(width)}>
-                  {#if editorIndentWidth === width}<Check size={16} />{:else}<span class="menu-spacer"></span>{/if}
-                  <span>{width} 个空格</span>
-                </button>
-              {/each}
-            {/if}
-          </div>
-        {/if}
-      </div>
-
-      {#if activeTab?.editing}
-        <div class="menu-wrap">
-          <button class="menu-trigger" aria-haspopup="menu" aria-expanded={openMenu === "insert"} onclick={() => toggleMenu("insert")}>
-            插入 <ChevronDown size={14} />
-          </button>
-          {#if openMenu === "insert"}
-            <div class="dropdown-menu" role="menu" tabindex="-1" transition:popupTransition={{ duration: 150, start: 0.97 }} onkeydown={handleMenuKeydown}>
-              <button role="menuitem" onclick={() => insertMarkdown("bold")}>
-                <Bold size={16} /><span>粗体</span><kbd>Ctrl+B</kbd>
-              </button>
-              <button role="menuitem" onclick={() => insertMarkdown("italic")}>
-                <Italic size={16} /><span>斜体</span><kbd>Ctrl+I</kbd>
-              </button>
-              <div class="menu-divider"></div>
-              <button role="menuitem" onclick={() => insertMarkdown("inlineCode")}>
-                <Code size={16} /><span>行内代码</span><kbd>Ctrl+Shift+K</kbd>
-              </button>
-              <button role="menuitem" onclick={() => insertMarkdown("codeBlock")}>
-                <Code size={16} /><span>代码块</span><kbd>Ctrl+Shift+C</kbd>
-              </button>
-              <div class="menu-divider"></div>
-              <button role="menuitem" onclick={() => insertMarkdown("link")}>
-                <Link size={16} /><span>链接</span><kbd>Ctrl+K</kbd>
-              </button>
-            </div>
-          {/if}
-        </div>
-        {/if}
-    </div>
-
-    <div class="toolbar-right">
-      {#if activeTab?.editing}
-        <button
-          class="tool-button"
-          aria-label="预览"
-          title={editorPreviewVisible ? "隐藏预览" : "显示预览"}
-          aria-pressed={editorPreviewVisible}
-          onclick={toggleEditorPreview}
-        >
-          {#if editorPreviewVisible}<EyeOff size={18} />{:else}<Eye size={18} />{/if}
-        </button>
-      {/if}
-      {#if activeTab && !activeTab.loading && !activeTab.error}
-        <button
-          class="tool-button mode-button"
-          aria-label="阅读/编辑模式"
-          title={activeTab.editing ? "阅读模式" : "编辑模式"}
-          aria-pressed={activeTab.editing}
-          onclick={() => void toggleEditing()}
-        >
-          {#if activeTab.editing}<BookOpen size={18} />{:else}<Pencil size={18} />{/if}
-        </button>
-        <span class="toolbar-separator"></span>
-      {/if}
       <button
-        class="tool-button"
-        aria-label="文档目录"
-        title={tocVisible ? "隐藏目录" : "显示目录"}
-        aria-pressed={Boolean(activeTab && tocVisible)}
-        onclick={toggleOutlinePanel}
+        class="titlebar-action settings-toggle"
+        aria-label={settingsOpen ? "关闭设置" : "设置"}
+        title={settingsOpen ? "关闭设置" : "设置"}
+        aria-controls="settings-panel"
+        aria-pressed={settingsOpen}
+        onclick={toggleSettings}
       >
-        {#if tocVisible}<PanelLeftClose size={18} />{:else}<PanelLeftOpen size={18} />{/if}
-      </button>
-      <button class="tool-button" aria-label="查找" title="查找当前文档 (Ctrl+F)" disabled={!activeTab || activeTab.loading || !!activeTab.error} onclick={() => { if (activeTab?.editing) editorComponent?.openSearch(); else void showSearch(); }}>
-        <Search size={18} />
+        <Settings size={16} strokeWidth={1.8} aria-hidden="true" />
+        <span>设置</span>
       </button>
     </div>
 
-    {#if searchOpen && activeTab && !activeTab.loading && !activeTab.error && !activeTab.editing}
-      <div
-        class="search-box floating-search-box"
-        role="search"
-        transition:popupTransition={{ duration: 150, start: 0.97 }}
-      >
-        <Search size={16} />
-        <input bind:this={searchInput} bind:value={searchQuery} placeholder="查找当前文档" aria-label="查找当前文档" onkeydown={handleSearchKeydown} />
-        <span class="search-count" aria-live="polite" aria-atomic="true">{searchCount ? activeSearchIndex + 1 + " / " + searchCount : "0 条"}</span>
-        <button class="search-step" aria-label="上一个匹配项" onclick={() => moveSearchMatch(-1)}><ChevronLeft size={16} /></button>
-        <button class="search-step" aria-label="下一个匹配项" onclick={() => moveSearchMatch(1)}><ChevronRight size={16} /></button>
-        <button class="search-close" aria-label="关闭查找" onclick={closeSearch}><X size={16} /></button>
-      </div>
+    <div class="tab-drag-space drag-region" data-tauri-drag-region></div>
+
+    {#if activeTab && !settingsOpen}
+    <div class="toolbar-right">
+      {#if activeTab && !activeTab.loading && !activeTab.error}
+        <div class="document-navigation-actions" role="group" aria-label="文档导航">
+          <div class="menu-wrap search-menu-wrap">
+            <button
+              class="tool-button tool-button-label"
+              aria-label="查找"
+              title="查找当前文档 (Ctrl+F)"
+              aria-expanded={Boolean(searchOpen && !activeTab.editing)}
+              aria-controls="reader-search-popover"
+              disabled={!activeTab || activeTab.loading || !!activeTab.error}
+              onclick={() => { if (activeTab?.editing) editorComponent?.toggleSearch(); else toggleReaderSearch(); }}
+            >
+              <Search size={18} /><span>查找</span>
+            </button>
+            {#if searchOpen && !activeTab.editing}
+              <div
+                id="reader-search-popover"
+                class="search-popover"
+                role="search"
+                aria-label="查找当前文档"
+                transition:popupTransition={{ duration: 160 }}
+              >
+                <div class="search-popover-header">
+                  <div class="search-popover-title"><Search size={16} aria-hidden="true" /><strong>查找</strong></div>
+                  <button class="search-close" aria-label="关闭查找" title="关闭查找" onclick={closeSearch}><X size={16} /></button>
+                </div>
+                <div class="search-popover-body">
+                  <div class="search-box search-popover-field">
+                    <Search size={16} aria-hidden="true" />
+                    <input bind:this={searchInput} bind:value={searchQuery} placeholder="查找当前文档" aria-label="查找当前文档" onkeydown={handleSearchKeydown} />
+                  </div>
+                  <div class="search-popover-footer">
+                    <span
+                      class="search-count"
+                      class:search-count-empty={!searchQuery.trim()}
+                      class:search-count-has-results={Boolean(searchQuery.trim()) && searchCount > 0}
+                      class:search-count-no-results={Boolean(searchQuery.trim()) && searchCount === 0}
+                      aria-live="polite"
+                      aria-atomic="true"
+                    >{searchQuery.trim() ? (searchCount ? activeSearchIndex + 1 + " / " + searchCount : "无匹配结果") : ""}</span>
+                    <div class="search-popover-navigation">
+                      <button class="search-step" aria-label="上一个匹配项" title="上一个匹配项" disabled={searchCount === 0} onclick={() => moveSearchMatch(-1)}><ChevronLeft size={16} /></button>
+                      <button class="search-step" aria-label="下一个匹配项" title="下一个匹配项" disabled={searchCount === 0} onclick={() => moveSearchMatch(1)}><ChevronRight size={16} /></button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            {/if}
+          </div>
+          <button
+            class="tool-button tool-button-label"
+            aria-label="文档目录"
+            title={tocVisible ? "隐藏目录" : "显示目录"}
+            aria-pressed={Boolean(activeTab && tocVisible)}
+            onclick={toggleOutlinePanel}
+          >
+            {#if tocVisible}<PanelLeftClose size={18} />{:else}<PanelLeftOpen size={18} />{/if}<span>目录</span>
+          </button>
+        </div>
+      {/if}
+    </div>
     {/if}
   </nav>
 
+  {#if tabs.length}
+    <div class="titlebar-tabs-row">
+      {@render documentTabs()}
+    </div>
+  {/if}
+
+    <div class="titlebar-preferences" role="group" aria-label="显示选项">
+      {#if activeTab && !activeTab.loading && !activeTab.error && !settingsOpen}
+        <button
+          class="window-mode-toggle"
+          aria-label={activeTab.editing ? "切换到阅读模式（当前为编辑）" : "切换到编辑模式（当前为阅读）"}
+          title={activeTab.editing ? "切换到阅读" : "切换到编辑"}
+          aria-pressed={activeTab.editing}
+          onclick={() => void toggleEditing()}
+        >
+          {#if activeTab.editing}<Pencil size={16} />{:else}<BookOpen size={16} />{/if}
+          <span>{activeTab.editing ? "编辑" : "阅读"}</span>
+        </button>
+      {/if}
+      <button
+        class="theme-toggle"
+        aria-label={darkMode ? "切换到浅色主题" : "切换到深色主题"}
+        title={darkMode ? "切换到浅色主题" : "切换到深色主题"}
+        aria-pressed={darkMode}
+        onclick={() => setTheme(darkMode ? "light" : "dark")}
+      >
+        {#if darkMode}<Sun size={16} />{:else}<Moon size={16} />{/if}
+      </button>
+    </div>
+
+    <div class="window-controls" role="group" aria-label="窗口控制">
+      <button class="window-minimize" aria-label="最小化" title="最小化" onclick={() => void minimizeWindow()}>
+        <Minus size={16} />
+      </button>
+      <button
+        class="window-maximize"
+        aria-label={windowMaximized ? "还原窗口" : "最大化窗口"}
+        title={windowMaximized ? "还原" : "最大化"}
+        onclick={() => void toggleMaximizeWindow()}
+      >
+        {#if windowMaximized}<Copy size={14} />{:else}<Square size={12} />{/if}
+      </button>
+      <button class="close-window" aria-label="关闭窗口" title="关闭窗口" onclick={() => void closeWindow()}>
+        <X size={16} />
+      </button>
+    </div>
+  </header>
+
+  {#if settingsOpen}
+      <section
+        class="settings-workspace"
+        id="settings-panel"
+        bind:this={settingsWorkspace}
+        aria-labelledby="settings-title"
+        in:shiftTransition={{ duration: 170, y: -8, scale: 1 }}
+        out:shiftTransition={{ duration: 100, y: -8, scale: 1 }}
+      >
+        <header class="settings-workspace-header">
+          <h2 id="settings-title">设置</h2>
+          <button
+            class="settings-close"
+            type="button"
+            aria-label="关闭设置"
+            title="关闭设置"
+            onclick={closeSettings}
+          >
+            <X size={18} />
+          </button>
+        </header>
+
+        <div class="settings-workspace-body">
+          <div class="settings-nav" role="tablist" aria-label="设置类别" aria-orientation="vertical">
+            <button id="settings-tab-appearance" type="button" role="tab" aria-selected={settingsCategory === "appearance"} tabindex={settingsCategory === "appearance" ? 0 : -1} class:active={settingsCategory === "appearance"} onclick={() => (settingsCategory = "appearance")} onkeydown={handleSettingsTabKeydown}>阅读外观</button>
+            <button id="settings-tab-behavior" type="button" role="tab" aria-selected={settingsCategory === "behavior"} tabindex={settingsCategory === "behavior" ? 0 : -1} class:active={settingsCategory === "behavior"} onclick={() => (settingsCategory = "behavior")} onkeydown={handleSettingsTabKeydown}>阅读行为</button>
+            <button id="settings-tab-files" type="button" role="tab" aria-selected={settingsCategory === "files"} tabindex={settingsCategory === "files" ? 0 : -1} class:active={settingsCategory === "files"} onclick={() => (settingsCategory = "files")} onkeydown={handleSettingsTabKeydown}>文件</button>
+            <button id="settings-tab-about" type="button" role="tab" aria-selected={settingsCategory === "about"} tabindex={settingsCategory === "about" ? 0 : -1} class:active={settingsCategory === "about"} onclick={() => (settingsCategory = "about")} onkeydown={handleSettingsTabKeydown}>关于</button>
+          </div>
+
+          <div class="settings-panel-content" role="tabpanel" id={"settings-panel-" + settingsCategory} aria-labelledby={"settings-tab-" + settingsCategory}>
+            {#if settingsCategory === "appearance"}
+              <section class="settings-page">
+                <h3>阅读外观</h3>
+                <div class="settings-control-row">
+                  <div class="settings-label"><span>主题</span><small>选择阅读界面的颜色</small></div>
+                  <div class="settings-segmented" role="radiogroup" aria-label="主题">
+                    <button type="button" role="radio" aria-checked={!darkMode} class:active={!darkMode} onclick={() => setTheme("light")}>浅色</button>
+                    <button type="button" role="radio" aria-checked={darkMode} class:active={darkMode} onclick={() => setTheme("dark")}>深色</button>
+                  </div>
+                </div>
+                <div class="settings-control-row">
+                  <div class="settings-label"><span>正文字号</span><small>按 1 px 调整，范围 15–25 px</small></div>
+                  <div class="font-size-controls">
+                    <div class="font-size-stepper" aria-label="正文字号">
+                      <button type="button" aria-label="减小字号" title="减小字号" disabled={fontSize <= minFontSize} onclick={() => changeFontSize(-1)}><Minus size={16} /></button>
+                      <output aria-live="polite">{fontSize} px</output>
+                      <button type="button" aria-label="增大字号" title="增大字号" disabled={fontSize >= maxFontSize} onclick={() => changeFontSize(1)}><Plus size={16} /></button>
+                    </div>
+                    <button class="settings-button" type="button" title="恢复默认字号（Ctrl+0）" disabled={fontSize === defaultFontSize} onclick={resetReadingFontSize}>恢复默认</button>
+                  </div>
+                </div>
+                <div class="settings-control-row">
+                  <div class="settings-label"><span>行距</span><small>即时应用到阅读和 HTML 导出</small></div>
+                  <div class="settings-segmented" role="radiogroup" aria-label="行距">
+                    <button type="button" role="radio" aria-checked={lineHeight === 1.6} class:active={lineHeight === 1.6} onclick={() => setReadingLineHeight("1.6")}>紧凑</button>
+                    <button type="button" role="radio" aria-checked={lineHeight === 1.8} class:active={lineHeight === 1.8} onclick={() => setReadingLineHeight("1.8")}>标准</button>
+                    <button type="button" role="radio" aria-checked={lineHeight === 2} class:active={lineHeight === 2} onclick={() => setReadingLineHeight("2")}>宽松</button>
+                  </div>
+                </div>
+                <div class="settings-preview-wrap">
+                    <h4>字号与行距示例</h4>
+                  <article class="settings-preview" style={`font-size:${fontSize}px;line-height:${lineHeight}`}>
+                    <h5>让文字保持舒适</h5>
+                    <p>字号与行距会同步应用到当前文档。长文阅读时，合适的行长和留白更容易保持注意力。</p>
+                    <p>行内代码示例：<code>markdown</code></p>
+                  </article>
+                </div>
+              </section>
+            {:else if settingsCategory === "behavior"}
+              <section class="settings-page">
+                <h3>阅读行为</h3>
+                <label class="settings-switch-row">
+                  <span class="settings-label"><span>启动时恢复上次文件</span><small>恢复已打开文档和上次阅读位置</small></span>
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    aria-checked={restoreLastSession}
+                    checked={restoreLastSession}
+                    onchange={(event) => { restoreLastSession = event.currentTarget.checked; savePreferences(); }}
+                  />
+                </label>
+                <label class="settings-switch-row">
+                  <span class="settings-label"><span>显示文档目录</span><small>记住目录栏的展开状态</small></span>
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    aria-checked={tocVisible}
+                    checked={tocVisible}
+                    onchange={(event) => { tocVisible = event.currentTarget.checked; savePreferences(); }}
+                  />
+                </label>
+                <h4 class="settings-subsection-title">编辑器</h4>
+                <label class="settings-switch-row">
+                  <span class="settings-label"><span>自动换行</span><small>长行在编辑区内折行显示</small></span>
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    aria-checked={editorWordWrap}
+                    checked={editorWordWrap}
+                    onchange={(event) => { editorWordWrap = event.currentTarget.checked; savePreferences(); }}
+                  />
+                </label>
+                <div class="settings-control-row">
+                  <div class="settings-label"><span>缩进宽度</span><small>按 Tab 输入的空格数</small></div>
+                  <div class="settings-segmented" role="radiogroup" aria-label="缩进宽度">
+                    {#each editorIndentWidths as width}
+                      <button type="button" role="radio" aria-checked={editorIndentWidth === width} class:active={editorIndentWidth === width} onclick={() => setEditorIndentWidth(width)}>{width} 空格</button>
+                    {/each}
+                  </div>
+                </div>
+              </section>
+            {:else if settingsCategory === "files"}
+              <section class="settings-page">
+                <h3>文件</h3>
+                <div class="settings-file-setting">
+                  <div class="settings-label"><span>默认打开目录</span><small>用作打开文件对话框的初始位置</small></div>
+                  <div class="settings-folder-control">
+                    <span class="settings-path" title={defaultOpenDirectory || "使用系统默认位置"}>{defaultOpenDirectory || "使用系统默认位置"}</span>
+                    <button class="settings-button" onclick={() => void chooseDefaultOpenDirectory()}>选择文件夹…</button>
+                  </div>
+                </div>
+                <div class="settings-file-setting">
+                  <div class="settings-label"><span>Markdown 文件</span><small>为 .md 和 .markdown 设置默认应用</small></div>
+                  <button class="settings-button" onclick={() => void openDefaultAppsSettings()}>打开默认应用设置</button>
+                </div>
+              </section>
+            {:else}
+              <section class="settings-page settings-about">
+                <h3>关于</h3>
+                <div class="settings-about-brand">
+                  <span class="settings-about-mark"><BookOpen size={22} /></span>
+                  <div><strong>LiteMD</strong><small>轻量本地 Markdown 阅读器</small></div>
+                </div>
+                <div class="settings-about-version"><span>版本</span><span>{appVersion}</span></div>
+              </section>
+            {/if}
+          </div>
+        </div>
+        {#if notice}
+          <div
+            class="notice settings-notice"
+            class:persistent={noticePersistent}
+            role={noticePersistent ? "alert" : "status"}
+            aria-live={noticePersistent ? "assertive" : "polite"}
+            onpointerenter={handleNoticePointerEnter}
+            onpointerleave={handleNoticePointerLeave}
+            onfocusin={handleNoticeFocusIn}
+            onfocusout={handleNoticeFocusOut}
+          >
+            {@render noticeContents()}
+          </div>
+        {/if}
+      </section>
+  {/if}
+
+  {#if tabContextMenu}
+    <div
+      class="tab-context-menu"
+      role="menu"
+      tabindex="-1"
+      style={`left:${tabContextMenu.x}px;top:${tabContextMenu.y}px`}
+      transition:popupTransition={{ duration: 150 }}
+      onkeydown={handleMenuKeydown}
+    >
+      <button role="menuitem" onclick={() => { const id = tabContextMenu?.tabId; tabContextMenu = null; if (id) closeTab(id); }}>关闭标签</button>
+      <button role="menuitem" onclick={() => { const id = tabContextMenu?.tabId; tabContextMenu = null; if (id) requestCloseTabs(tabs.filter((tab) => tab.id !== id).map((tab) => tab.id)); }}>关闭其他标签</button>
+      {#if tabs.find((tab) => tab.id === tabContextMenu?.tabId)?.path}
+        <div class="menu-divider"></div>
+        <button role="menuitem" onclick={() => { const id = tabContextMenu?.tabId; if (id) void copyTabPath(id); }}>复制文件路径</button>
+      {/if}
+    </div>
+  {/if}
+
+
+
   <section
     class="reader-layout"
+    class:settings-hidden={settingsOpen}
     class:with-outline={!!activeTab && tocVisible && !activeTab.loading && !activeTab.error}
     class:external-changed={!!activeTab?.externalChange && !activeTab.loading && !activeTab.error}
-    style={"--outline-width:" + outlineWidth + "px"}
+    class:dragging-files={draggingFiles}
+    aria-hidden={settingsOpen}
+    inert={settingsOpen}
+    style={"--outline-width:" + visibleOutlineWidth + "px"}
   >
     {#if activeTab?.externalChange && !activeTab.loading && !activeTab.error}
       <div class="external-banner" role="status" aria-live="polite">
@@ -2948,7 +3543,8 @@
     {/if}
 
     {#if activeTab && tocVisible && !activeTab.loading && !activeTab.error}
-      <aside class="outline-panel" aria-label="文档目录" in:panelTransition={{ x: -8, duration: 140 }}>
+      <aside class="outline-panel" aria-label="文档目录" transition:panelTransition={{ x: -8, duration: 160 }} inert={!tocVisible}>
+        <div class="outline-header"><span>文档目录</span></div>
         {#if activeTab.headings.length}
           <nav class="outline-list" aria-label="标题目录">
             {#each activeTab.headings as heading (heading.id)}
@@ -2956,7 +3552,7 @@
                 class="outline-item"
                 class:current={activeHeadingId === heading.id}
                 aria-current={activeHeadingId === heading.id ? "location" : undefined}
-                style={"--heading-indent:" + ((heading.level - 1) * 14 + 10) + "px"}
+                style={"--heading-indent:" + ((heading.level - 1) * 12 + 8) + "px"}
                 title={heading.title}
                 onclick={() => jumpToHeading(heading)}
               >
@@ -2965,19 +3561,20 @@
             {/each}
           </nav>
         {:else}
-          <p class="outline-empty">这篇文档还没有标题</p>
+          <p class="outline-empty">此文档没有标题目录</p>
         {/if}
       </aside>
       <div
         class="outline-splitter"
-        in:fadeTransition={{ duration: 100 }}
+        transition:fadeTransition={{ duration: 120 }}
+        inert={!tocVisible}
         role="slider"
         aria-label="调整目录宽度"
         aria-orientation="vertical"
         aria-valuemin={minOutlineWidth}
         aria-valuemax={maxOutlineWidth}
-        aria-valuenow={Math.round(outlineWidth)}
-        aria-valuetext={`${Math.round(outlineWidth)} 像素`}
+        aria-valuenow={Math.round(visibleOutlineWidth)}
+        aria-valuetext={`${Math.round(visibleOutlineWidth)} 像素`}
         tabindex="0"
         onpointerdown={beginOutlineResize}
         onpointermove={resizeOutline}
@@ -2987,47 +3584,7 @@
       ></div>
     {/if}
     {#if !activeTab}
-      <section class="home-screen">
-        <div class="home-content" class:has-recent={recentFiles.length > 0}>
-          <div class="home-actions">
-            <button class="home-action-button" aria-label="打开文件" title="打开文件 (Ctrl+O)" onclick={() => void openFiles()}>
-              <span class="home-action-copy"><FolderOpen size={18} strokeWidth={1.8} /><span>打开文件</span></span>
-              <kbd aria-hidden="true">Ctrl+O</kbd>
-            </button>
-            <button class="home-action-button" aria-label="新建文件" title="新建文件 (Ctrl+N)" onclick={() => void createMarkdownDocument()}>
-              <span class="home-action-copy"><FilePlus size={18} strokeWidth={1.8} /><span>新建文件</span></span>
-              <kbd aria-hidden="true">Ctrl+N</kbd>
-            </button>
-          </div>
-
-          <div class="recent-section">
-            <div class="recent-heading">
-              <span>最近文件</span>
-              {#if recentFiles.length}<button onclick={clearRecentFiles}>清空</button>{/if}
-            </div>
-            {#if recentFiles.length}
-              <ul class="recent-list">
-                {#each recentFiles as file (file.path)}
-                  <li>
-                    <button class="recent-file" title={displayPath(file.path)} onclick={() => void openPath(file.path)}>
-                      <span class="recent-file-icon"><FileText size={22} strokeWidth={1.7} /></span>
-                      <span class="recent-file-copy">
-                        <strong>{file.name}</strong>
-                        <small>{displayPath(file.path)}</small>
-                      </span>
-                    </button>
-                    <button class="remove-recent" aria-label={"移除 " + file.name} title="从最近记录移除" onclick={() => removeRecent(file.path)}>
-                      <X size={16} />
-                    </button>
-                  </li>
-                {/each}
-              </ul>
-            {:else}
-              <div class="recent-empty">暂无最近文件</div>
-            {/if}
-          </div>
-        </div>
-      </section>
+      <section class="empty-workspace" aria-label="空白工作区"></section>
     {:else if activeTab.loading}
       <section class="document-state">
         <div class="loading-ring" role="status" aria-label="正在加载文档"></div>
@@ -3039,86 +3596,46 @@
         <h2>无法打开这篇文档</h2>
         <p>{activeTab.error}</p>
         <div class="error-actions">
-          <button class="secondary-button" onclick={() => void openPath(activeTab.path)}>重试</button>
+          <button class="primary-button" onclick={() => void openPath(activeTab.path)}>重试</button>
           <button class="secondary-button" onclick={() => closeTab(activeTab.id)}>关闭标签</button>
         </div>
       </section>
     {:else if activeTab.editing}
       {@const editorInstanceId = activeTab.editorInstanceId}
       <div
-        class="editor-split"
+        class="editor-workspace"
         in:fadeTransition={{ duration: 120 }}
-        class:preview-visible={editorPreviewVisible}
-        bind:this={editorSplitElement}
-        style={editorPreviewVisible
-          ? "grid-template-columns:minmax(0," + editorSplitRatio + "fr) 8px minmax(0," + (1 - editorSplitRatio) + "fr)"
-          : "grid-template-columns:minmax(0,1fr)"}
+        role="region"
+        aria-label="Markdown 源码编辑器"
       >
-        <div class="editor-source-pane" role="region" aria-label="Markdown 源码编辑器">
-          <div class="editor-viewport">
-            {#key editorInstanceId}
-              <MarkdownEditor
-                bind:this={editorComponent}
-                value={activeTab.source}
-                editorState={activeTab.editorState}
-                editorCompartments={activeTab.editorCompartments}
-                cursor={activeTab.cursor}
-                editorScrollProgress={activeTab.editorScrollProgress}
-                lineEnding={activeTab.lineEnding}
-                darkMode={darkMode}
-                wordWrap={editorWordWrap}
-                indentWidth={editorIndentWidth}
-                onCursorChange={(cursor, line) =>
-                  handleEditorCursorChange(editorInstanceId, cursor, line)
-                }
-                onScrollPositionChange={(scrollTop, progress) =>
-                  handleEditorScrollPositionChange(editorInstanceId, scrollTop, progress)}
-                onSave={(saveAs) => void saveActiveTab(saveAs)}
-                onEditorStateChange={(state, compartments, documentChanged) =>
-                  handleEditorStateChange(editorInstanceId, state, compartments, documentChanged)}
-              />
-            {/key}
-          </div>
+        <div class="editor-viewport">
+          {#key editorInstanceId}
+            <MarkdownEditor
+              bind:this={editorComponent}
+              value={activeTab.source}
+              editorState={activeTab.editorState}
+              editorCompartments={activeTab.editorCompartments}
+              cursor={activeTab.cursor}
+              editorScrollProgress={activeTab.editorScrollProgress}
+              lineEnding={activeTab.lineEnding}
+              darkMode={darkMode}
+              wordWrap={editorWordWrap}
+              indentWidth={editorIndentWidth}
+              selectionToolbarEnabled={!tabContextMenu}
+              onCursorChange={(cursor, line) =>
+                handleEditorCursorChange(editorInstanceId, cursor, line)
+              }
+              onScrollPositionChange={(scrollTop, progress) =>
+                handleEditorScrollPositionChange(editorInstanceId, scrollTop, progress)}
+              onSave={(saveAs) => void saveActiveTab(saveAs)}
+              onEditorStateChange={(state, compartments, documentChanged) =>
+                handleEditorStateChange(editorInstanceId, state, compartments, documentChanged)}
+            />
+          {/key}
         </div>
-        {#if editorPreviewVisible}
-          <div
-            class="editor-splitter"
-            in:fadeTransition={{ duration: 100 }}
-            role="slider"
-            aria-label="调整源码与预览宽度"
-            aria-orientation="vertical"
-            aria-valuemin={Math.round(minEditorSplitRatio * 100)}
-            aria-valuemax={Math.round(maxEditorSplitRatio * 100)}
-            aria-valuenow={Math.round(editorSplitRatio * 100)}
-            aria-valuetext={`${Math.round(editorSplitRatio * 100)}% 源码`}
-            tabindex="0"
-            onpointerdown={beginEditorSplitResize}
-            onpointermove={resizeEditorSplit}
-            onpointerup={finishEditorSplitResize}
-            onpointercancel={finishEditorSplitResize}
-            onkeydown={handleEditorSplitKeydown}
-          ></div>
-          <div
-            class="editor-preview-pane"
-            role="region"
-            aria-label="Markdown 预览"
-            in:panelTransition={{ x: 8, duration: 140 }}
-          >
-            <div class="reader-viewport" bind:this={readerViewport} onscroll={handleReaderScroll} use:bindFontZoomWheel>
-              <article
-                class="reader-content"
-                bind:this={readerContent}
-                style={"font-size:" + fontSize + "px"}
-                use:interceptReaderLinks
-              >
-                {@html activeTab.html}
-              </article>
-            </div>
-          </div>
-        {/if}
       </div>
     {:else}
-      <div class="reader-viewport" in:fadeTransition={{ duration: 120 }} bind:this={readerViewport} onscroll={handleReaderScroll} use:bindFontZoomWheel>
+      <div class="reader-viewport" role="region" aria-label="文档内容" tabindex="-1" in:fadeTransition={{ duration: 120 }} bind:this={readerViewport} onscroll={handleReaderScroll} use:bindFontZoomWheel>
         <article
           class="reader-content"
           bind:this={readerContent}
@@ -3129,55 +3646,133 @@
         </article>
       </div>
     {/if}
+    {#if activeTab?.editing && !activeTab.loading && !activeTab.error}
+      <div class="print-document" aria-hidden="true">
+        <article class="reader-content" style={"font-size:" + fontSize + "px"}>
+          {@html activeTab.html}
+        </article>
+      </div>
+    {/if}
   </section>
 
-  {#if pendingCloseIds.length}
-    <div class="modal-backdrop" transition:popupTransition={{ duration: 180, start: 1 }}>
-      <div class="confirm-dialog" role="alertdialog" tabindex="-1" aria-modal="true" aria-labelledby="close-confirm-title" transition:popupTransition={{ duration: 180, start: 0.96 }} onkeydown={handleConfirmDialogKeydown}>
-        <h2 id="close-confirm-title">有未保存的修改</h2>
-        <p>
-          {closeAfterConfirmation
-            ? "退出前需要处理这些未保存文档。"
+  {#if pendingCloseIds.length || pendingConfirmation}
+    <div class="modal-backdrop">
+      <div class="modal-backdrop-shade" aria-hidden="true" in:fadeTransition={{ duration: 160 }} out:fadeTransition={{ duration: 100 }}></div>
+      <div
+        class="confirm-dialog"
+        class:action-confirm-dialog={pendingConfirmation !== null}
+        role="alertdialog"
+        tabindex="-1"
+        aria-modal="true"
+        aria-labelledby={pendingConfirmation ? "action-confirm-title" : "close-confirm-title"}
+        aria-describedby={
+          pendingConfirmation
+            ? "action-confirm-description"
             : pendingCloseIds.length > 1
-              ? "关闭前需要处理这些文档的未保存修改。"
-              : "关闭前需要处理这篇文档的未保存修改。"}
-        </p>
-        {#if pendingCloseIds.length > 1}
-          <ul class="pending-document-list">
-            {#each pendingCloseIds as id (id)}
-              {@const pendingTab = tabs.find((tab) => tab.id === id)}
-              {#if pendingTab && isDirty(pendingTab)}<li>{pendingTab.name}</li>{/if}
-            {/each}
-          </ul>
+              ? "close-confirm-documents"
+              : undefined
+        }
+        in:shiftTransition={{ duration: 160 }}
+        out:shiftTransition={{ duration: 100 }}
+        onkeydown={handleConfirmDialogKeydown}
+      >
+        {#if pendingConfirmation}
+          <h2 id="action-confirm-title">{pendingConfirmation.title}</h2>
+          <p id="action-confirm-description">{pendingConfirmation.message}</p>
+        {:else}
+          <h2 id="close-confirm-title">有未保存的修改</h2>
+          <button
+            class="confirm-dialog-close"
+            data-cancel-close
+            aria-label="取消"
+            title="取消"
+            onclick={cancelPendingClose}
+          ><X size={18} /></button>
+          {#if pendingCloseIds.length > 1}
+            <ul id="close-confirm-documents" class="pending-document-list">
+              {#each pendingCloseIds as id (id)}
+                {@const pendingTab = tabs.find((tab) => tab.id === id)}
+                {#if pendingTab && isDirty(pendingTab)}<li>{pendingTab.name}</li>{/if}
+              {/each}
+            </ul>
+          {/if}
         {/if}
-        <div class="dialog-actions">
-          <button class="secondary-button" onclick={cancelPendingClose}>取消</button>
-          <button class="secondary-button" disabled={closeSaveInProgress} onclick={() => void resolvePendingClose("discard")}>放弃修改</button>
-          <button class="primary-button" disabled={closeSaveInProgress} onclick={() => void resolvePendingClose("save")}>
-            {closeSaveInProgress ? "正在保存…" : closeAfterConfirmation ? "保存并退出" : "保存并关闭"}
-          </button>
+        {#if notice}
+          <div
+            class="notice confirm-notice"
+            class:persistent={noticePersistent}
+            role={noticePersistent ? "alert" : "status"}
+            aria-live={noticePersistent ? "assertive" : "polite"}
+            onpointerenter={handleNoticePointerEnter}
+            onpointerleave={handleNoticePointerLeave}
+            onfocusin={handleNoticeFocusIn}
+            onfocusout={handleNoticeFocusOut}
+          >
+            {@render noticeContents()}
+          </div>
+        {/if}
+        <div class="dialog-actions" class:close-confirm-actions={!pendingConfirmation}>
+          {#if pendingConfirmation}
+            {#if pendingConfirmation.tone === "danger"}
+              <button class="danger-button" data-confirm-action onclick={() => resolveActionConfirmation(true)}>{pendingConfirmation.confirmLabel}</button>
+              <button class="secondary-button" data-cancel-confirm onclick={() => resolveActionConfirmation(false)}>取消</button>
+            {:else}
+              <button class="secondary-button" data-cancel-confirm onclick={() => resolveActionConfirmation(false)}>取消</button>
+              <button class="primary-button" data-confirm-action onclick={() => resolveActionConfirmation(true)}>{pendingConfirmation.confirmLabel}</button>
+            {/if}
+          {:else}
+            <button class="danger-button" disabled={closeSaveInProgress} onclick={() => void resolvePendingClose("discard")}>不保存</button>
+            <button class="primary-button save-close-button" data-save-close aria-busy={closeSaveInProgress} disabled={closeSaveInProgress} onclick={() => void resolvePendingClose("save")}>
+              {#if closeSaveInProgress}
+                <span class="button-spinner" aria-hidden="true"></span>
+                <span>正在保存…</span>
+              {:else}
+                <span>{closeAfterConfirmation ? "保存并退出" : "保存并关闭"}</span>
+              {/if}
+            </button>
+          {/if}
         </div>
       </div>
     </div>
   {/if}
 
   {#if zoomedImage}
-    <div class="image-zoom-backdrop" role="dialog" aria-modal="true" aria-label={zoomedImage.alt || "图片预览"} tabindex="-1" transition:popupTransition={{ duration: 180, start: 1 }}>
-      <button class="image-zoom-close" aria-label="关闭图片预览" title="关闭图片预览" onclick={() => (zoomedImage = null)}>
+    <div class="image-zoom-backdrop" role="dialog" aria-modal="true" aria-label={zoomedImage.alt || "图片预览"} tabindex="-1" onkeydown={handleImagePreviewKeydown} onclick={handleImagePreviewClick}>
+      <div class="image-zoom-backdrop-shade" aria-hidden="true" in:fadeTransition={{ duration: 160 }} out:fadeTransition={{ duration: 100 }}></div>
+      <button class="image-zoom-close" bind:this={imageZoomClose} aria-label="关闭图片预览" title="关闭图片预览" onclick={closeImagePreview} in:shiftTransition={{ duration: 160 }} out:shiftTransition={{ duration: 100 }}>
         <X size={20} />
       </button>
-      <img src={zoomedImage.src} alt={zoomedImage.alt} transition:popupTransition={{ duration: 180, start: 0.98 }} />
+      <img src={zoomedImage.src} alt={zoomedImage.alt || "图片预览"} in:shiftTransition={{ duration: 160 }} out:shiftTransition={{ duration: 100 }} />
+      {#if notice}
+        <div
+          class="notice image-preview-notice"
+          class:persistent={noticePersistent}
+          role={noticePersistent ? "alert" : "status"}
+          aria-live={noticePersistent ? "assertive" : "polite"}
+          onpointerenter={handleNoticePointerEnter}
+          onpointerleave={handleNoticePointerLeave}
+          onfocusin={handleNoticeFocusIn}
+          onfocusout={handleNoticeFocusOut}
+        >
+          {@render noticeContents()}
+        </div>
+      {/if}
     </div>
   {/if}
 
-  {#if notice}
+  {#if notice && !settingsOpen && !pendingCloseIds.length && !pendingConfirmation && !zoomedImage}
     <div
       class="notice"
-      role="status"
-      aria-live="polite"
-      transition:popupTransition={{ duration: 180, start: 0.97 }}
+      class:persistent={noticePersistent}
+      role={noticePersistent ? "alert" : "status"}
+      aria-live={noticePersistent ? "assertive" : "polite"}
+      transition:popupTransition={{ duration: 160 }}
+      onpointerenter={handleNoticePointerEnter}
+      onpointerleave={handleNoticePointerLeave}
+      onfocusin={handleNoticeFocusIn}
+      onfocusout={handleNoticeFocusOut}
     >
-      {notice}
+      {@render noticeContents()}
     </div>
   {/if}
 </main>
@@ -3198,7 +3793,7 @@
   :global(body) {
     font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
     font-size: 15px;
-    font-weight: 500;
+    font-weight: 400;
     text-rendering: optimizeLegibility;
   }
 
@@ -3208,47 +3803,68 @@
   }
 
   .app-shell {
+    position: relative;
     --ease-out: cubic-bezier(0.333333, 1, 0.666667, 1);
-    --titlebar-height: 50px;
-    --toolbar-height: 46px;
-    --toolbar-inline-padding: 18px;
-    --radius-control: 8px;
+    --titlebar-height: 48px;
+    --toolbar-inline-padding: 16px;
+    --radius-control: 6px;
     --radius-popover: 10px;
-    --radius-dialog: 14px;
-    --duration-interaction: 140ms;
-    --duration-press-in: 130ms;
-    --duration-press-out: 100ms;
+    --radius-dialog: 12px;
+    --duration-interaction: 100ms;
+    --duration-press-in: 80ms;
+    --duration-press-out: 150ms;
     --duration-surface: 160ms;
-    --window-bg: #eef1f5;
-    --surface: #f8fafc;
+    --duration-theme: 160ms;
+    --ease-theme: cubic-bezier(0.2, 0, 0.2, 1);
+    --window-bg: #f5f6f8;
+    --chrome-bg: #f3f4f6;
+    --sidebar-bg: #f6f7f9;
+    --surface: #ffffff;
     --reading-surface: #ffffff;
-    --surface-muted: #eef3f8;
+    --surface-muted: #f1f3f6;
     --surface-highlight: rgba(255, 255, 255, 0.7);
-    --text: #1f2d3d;
-    --muted: #5f7185;
-    --subtle: #64758a;
-    --line: #dce4ed;
-    --line-strong: #cbd6e2;
-    --accent: #326bd1;
+    --text: #252830;
+    --muted: #353b45;
+    --subtle: #3d444f;
+    --disabled: #4b535f;
+    --line: #e2e5ea;
+    --line-strong: #818a99;
+    --accent: #3d5bc3;
     --accent-foreground: #ffffff;
-    --accent-hover: #275bb7;
-    --accent-soft: #e8f0fc;
-    --error: #a52229;
-    --hover: #edf3fa;
-    --code-bg: #f1f5f9;
-    --code-comment: #5f7185;
-    --code-keyword: #8255b5;
-    --code-string: #2b704f;
-    --code-number: #a14f27;
-    --code-title: #286da5;
-    --search-hit-bg: #fff1bc;
-    --search-hit-text: #312a1c;
-    --search-hit-current-bg: #f3c654;
-    --search-hit-current-outline: rgba(111, 77, 18, 0.48);
-    --shadow: 0 14px 36px rgba(31, 49, 73, 0.16);
+    --accent-hover: #324ca8;
+    --accent-pressed: #2b4192;
+    --accent-soft: #ebefff;
+    --selected-bg: #ebefff;
+    --selection-bg: #dce4ff;
+    --hover: #e9edf3;
+    --pressed: #dde3ec;
+    --error: #b42332;
+    --error-bg: #fff0f2;
+    --error-pressed-bg: #f9d7db;
+    --modal-backdrop: rgba(25, 32, 50, 0.3);
+    --image-backdrop: rgba(0, 0, 0, 0.84);
+    --window-close-hover-bg: #d8343d;
+    --window-close-pressed-bg: #b42332;
+    --success: #236645;
+    --success-bg: #ecf7f0;
+    --warning: #805900;
+    --warning-bg: #fff6db;
+    --code-bg: #f1f3f6;
+    --code-comment: #626875;
+    --code-keyword: #7546a3;
+    --code-string: #286345;
+    --code-number: #8d4b24;
+    --code-title: #285a94;
+    --search-hit-bg: #fff0b8;
+    --search-hit-text: #493b16;
+    --search-hit-current-bg: #f3ce66;
+    --search-hit-current-outline: rgba(53, 40, 5, 0.72);
+    --shadow-popover: 0 4px 16px rgba(25, 32, 50, 0.12);
+    --shadow-dialog: 0 16px 48px rgba(25, 32, 50, 0.18);
+    --shadow: var(--shadow-popover);
     color-scheme: light;
     display: grid;
-    grid-template-rows: var(--titlebar-height) var(--toolbar-height) minmax(0, 1fr);
+    grid-template-rows: var(--titlebar-height) minmax(0, 1fr);
     width: 100vw;
     height: 100vh;
     min-width: 0;
@@ -3257,44 +3873,69 @@
     overflow: hidden;
   }
 
+  .app-shell.with-workspace-tabs {
+    --titlebar-height: 86px;
+  }
+
+  .app-shell.window-resize-hover,
+  .app-shell.window-resize-hover :global(*) {
+    cursor: var(--window-resize-cursor) !important;
+  }
+
   .app-shell.dark {
     color-scheme: dark;
-    --window-bg: #151d28;
-    --surface: #1b2633;
-    --reading-surface: #1a2430;
-    --surface-muted: #202d3c;
+    --window-bg: #181a20;
+    --chrome-bg: #202229;
+    --sidebar-bg: #202229;
+    --surface: #24272f;
+    --reading-surface: #1b1d23;
+    --surface-muted: #252932;
     --surface-highlight: rgba(255, 255, 255, 0.04);
-    --text: #e7edf5;
-    --muted: #afbdce;
-    --subtle: #9aabc0;
-    --line: #2c3a4b;
-    --line-strong: #3c4d61;
-    --accent: #8ab4ff;
-    --accent-foreground: #17253a;
-    --accent-hover: #a4c5ff;
-    --accent-soft: #263b57;
-    --error: #ff9095;
-    --hover: #253446;
-    --code-bg: #202c39;
-    --code-comment: #afbdce;
-    --code-keyword: #c5a4eb;
-    --code-string: #76c895;
-    --code-number: #f0a677;
-    --code-title: #80b8e9;
-    --search-hit-bg: #59471f;
-    --search-hit-text: #fff2cc;
-    --search-hit-current-bg: #765a1f;
-    --search-hit-current-outline: rgba(255, 226, 153, 0.82);
-    --shadow: 0 16px 38px rgba(0, 0, 0, 0.34);
+    --text: #e6e8ee;
+    --muted: #adb3c0;
+    --subtle: #9199a8;
+    --disabled: #8d95a3;
+    --line: #323640;
+    --line-strong: #707989;
+    --accent: #a7b8ff;
+    --accent-foreground: #1d263e;
+    --accent-hover: #bcc8ff;
+    --accent-pressed: #94a7f1;
+    --accent-soft: #303a59;
+    --selected-bg: #303a59;
+    --selection-bg: #3d4f7e;
+    --hover: #30343e;
+    --pressed: #3a404d;
+    --error: #ff9ca8;
+    --error-bg: #44262e;
+    --error-pressed-bg: #5b303a;
+    --modal-backdrop: rgba(0, 0, 0, 0.48);
+    --image-backdrop: rgba(0, 0, 0, 0.9);
+    --success: #91d5aa;
+    --success-bg: #223a2b;
+    --warning: #e8c56a;
+    --warning-bg: #3b321d;
+    --code-bg: #252932;
+    --code-comment: #a4adbd;
+    --code-keyword: #ccaff2;
+    --code-string: #92d3aa;
+    --code-number: #eab48a;
+    --code-title: #9ac5f0;
+    --search-hit-bg: #594a23;
+    --search-hit-text: #fff1bb;
+    --search-hit-current-bg: #795b19;
+    --search-hit-current-outline: rgba(255, 244, 204, 0.9);
+    --shadow-popover: 0 6px 20px rgba(0, 0, 0, 0.28);
+    --shadow-dialog: 0 18px 56px rgba(0, 0, 0, 0.42);
+    --shadow: var(--shadow-popover);
   }
 
-  .app-shell.home-state {
+  .app-shell.no-document-state {
     background: var(--window-bg);
     position: relative;
-    grid-template-rows: var(--titlebar-height) minmax(0, 1fr);
   }
 
-  .app-shell.dark.home-state {
+  .app-shell.dark.no-document-state {
     background: var(--window-bg);
   }
 
@@ -3305,14 +3946,14 @@
   }
 
   .app-shell :global(button) {
-    --button-transform-duration: var(--duration-press-out);
+    cursor: pointer;
     transition:
       color var(--duration-interaction) var(--ease-out),
       background-color var(--duration-interaction) var(--ease-out),
       border-color var(--duration-interaction) var(--ease-out),
       opacity var(--duration-interaction) var(--ease-out),
       box-shadow var(--duration-interaction) var(--ease-out),
-      transform var(--button-transform-duration) var(--ease-out);
+      transform var(--duration-press-out) var(--ease-out);
   }
 
   .app-shell :global(button svg) {
@@ -3322,9 +3963,15 @@
     stroke-width: 1.8px;
   }
 
-  .app-shell :global(button:active:not(:disabled):not([draggable="true"])) {
-    --button-transform-duration: var(--duration-press-in);
-    transform: scale(0.985);
+  .app-shell :global(button:disabled) {
+    color: var(--disabled);
+    cursor: default;
+    opacity: 1;
+  }
+
+  .app-shell :global(::selection) {
+    color: var(--text);
+    background: var(--selection-bg, #dce4ff);
   }
 
   .app-shell,
@@ -3333,15 +3980,13 @@
   .tab-shell,
   .reader-layout,
   .outline-panel,
-  .settings-panel,
+  .settings-workspace,
   .dropdown-menu,
+  .search-popover,
   .tab-context-menu,
   .state-icon,
-  .recent-list li,
-  .recent-file-icon,
   .reader-viewport,
-  .editor-split,
-  .editor-preview-pane,
+  .editor-workspace,
   .editor-viewport,
   .confirm-dialog,
   .search-box {
@@ -3352,67 +3997,279 @@
       box-shadow var(--duration-surface) var(--ease-out);
   }
 
+  .app-shell.theme-switching,
+  .app-shell.theme-switching :global(*) {
+    transition-duration: var(--duration-theme) !important;
+    transition-timing-function: var(--ease-theme) !important;
+    transition-delay: 0ms !important;
+  }
+
   .titlebar {
-    --window-controls-width: 138px;
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-rows: 48px;
     align-items: stretch;
     min-width: 0;
-    background: var(--surface);
+    height: var(--titlebar-height);
+    background: var(--chrome-bg);
     border-bottom: 1px solid var(--line);
     box-shadow: none;
     user-select: none;
   }
 
-  .brand-lockup {
-    display: flex;
-    flex: 0 0 auto;
-    align-items: center;
-    gap: 10px;
-    min-width: 0;
-    padding: 0 20px;
-    color: var(--text);
+  .app-shell.with-workspace-tabs .titlebar {
+    grid-template-rows: 48px 37px;
   }
 
-  .brand-mark {
-    display: inline-flex;
-    flex: 0 0 28px;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    border-radius: 7px;
-    color: #ffffff;
-    background: linear-gradient(145deg, #3287f5, #1f73df);
+  .app-shell.window-inactive .tab-shell:not(.selected) .tab-name {
+    opacity: 0.98;
   }
 
-  .brand-name {
-    font-size: 15px;
-    font-weight: 650;
-    letter-spacing: -0.15px;
-  }
-
-  .home-state .tab-strip,
-  .home-state .home-page-button,
-  .home-state .toolbar {
-    display: none;
-  }
-
-  .titlebar-actions {
-    display: flex;
-    flex: 0 0 auto;
-    align-items: center;
-    gap: 4px;
-    padding: 0 12px;
+  .app-shell.window-inactive .tab-shell:not(.selected) .tab-button > :global(svg),
+  .app-shell.window-inactive .tab-close :global(svg),
+  .app-shell.window-inactive .titlebar-preferences button :global(svg),
+  .app-shell.window-inactive .window-controls button :global(svg) {
+    opacity: 0.86;
   }
 
   .titlebar-action {
     display: inline-flex;
-    flex: 0 0 36px;
+    flex: 0 0 auto;
     align-items: center;
     justify-content: center;
-    width: 36px;
-    height: 36px;
-    padding: 0;
+    gap: 6px;
+    width: auto;
+    height: 32px;
+    padding: 0 9px;
+    border: 0;
+    border-radius: var(--radius-control);
+    color: var(--muted);
+    background: transparent;
+    font-size: 14px;
+    cursor: pointer;
+  }
+
+  .titlebar-action:hover,
+  .titlebar-action[aria-pressed="true"] {
+    color: var(--text);
+    background: var(--hover);
+  }
+
+  .titlebar-action[aria-pressed="true"] {
+    --button-pressed-bg: var(--accent-soft);
+    color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  .titlebar-action span {
+    white-space: nowrap;
+  }
+
+  .settings-workspace {
+    position: absolute;
+    inset: var(--titlebar-height) 0 0;
+    z-index: 4;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    color: var(--text);
+    background: var(--window-bg);
+  }
+
+  .app-shell.settings-open .reader-layout {
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .settings-workspace-header {
+    display: flex;
+    flex: 0 0 60px;
+    align-items: center;
+    padding: 0 28px;
+    border-bottom: 1px solid var(--line);
+    background: var(--chrome-bg);
+  }
+
+  .settings-workspace-header h2 {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+
+  .settings-workspace-body {
+    display: grid;
+    flex: 1 1 auto;
+    grid-template-columns: 208px minmax(0, 1fr);
+    min-height: 0;
+  }
+
+  .settings-notice {
+    position: static;
+    width: auto;
+    max-width: none;
+    max-height: min(30vh, 180px);
+    margin: 0 24px 16px;
+    translate: none;
+    box-shadow: none;
+  }
+
+  .settings-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 20px 12px;
+    border-right: 1px solid var(--line);
+    background: var(--sidebar-bg);
+  }
+
+  .settings-nav button {
+    min-height: 36px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: var(--radius-control);
+    color: var(--muted);
+    background: transparent;
+    font-size: 15px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .settings-nav button:hover {
+    color: var(--text);
+    background: var(--hover);
+  }
+
+  .settings-nav button.active {
+    --button-pressed-bg: var(--selected-bg);
+    color: var(--accent);
+    background: var(--selected-bg);
+    font-weight: 600;
+  }
+
+  .settings-panel-content {
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    padding: 32px 40px;
+    scrollbar-color: var(--line-strong) transparent;
+    scrollbar-width: thin;
+  }
+
+  .settings-page {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    min-width: 0;
+  }
+
+  .settings-page h3 {
+    margin: 0 0 8px;
+    color: var(--text);
+    font-size: 18px;
+    font-weight: 600;
+    line-height: 1.5;
+  }
+
+  .settings-subsection-title {
+    margin: 20px 0 0;
+    padding: 18px 0 10px;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.45;
+  }
+
+  .settings-control-row,
+  .settings-switch-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 24px;
+    min-width: 0;
+    min-height: 72px;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .settings-control-row > :last-child,
+  .settings-switch-row > input[type="checkbox"] {
+    justify-self: end;
+  }
+
+  .settings-label {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-width: 0;
+    gap: 4px;
+    color: var(--text);
+    font-size: 15px;
+  }
+
+  .settings-label small,
+  .settings-about-brand small {
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  .settings-segmented,
+  .font-size-stepper {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    min-height: 36px;
+    padding: 1px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface-muted);
+  }
+
+  .settings-segmented button {
+    min-width: 66px;
+    height: 32px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: var(--radius-control);
+    color: var(--muted);
+    background: transparent;
+    font-size: 15px;
+    cursor: pointer;
+  }
+
+  .settings-segmented button:hover {
+    color: var(--text);
+    background: var(--hover);
+  }
+
+  .settings-segmented button.active {
+    --button-pressed-bg: var(--selected-bg);
+    color: var(--accent);
+    background: var(--selected-bg);
+    font-weight: 500;
+  }
+
+  .font-size-stepper {
+    gap: 4px;
+    padding: 1px;
+  }
+
+  .font-size-controls {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .font-size-stepper button {
+    display: grid;
+    width: 32px;
+    height: 32px;
+    place-items: center;
     border: 0;
     border-radius: var(--radius-control);
     color: var(--muted);
@@ -3420,138 +4277,80 @@
     cursor: pointer;
   }
 
-  .titlebar-action:hover,
-  .titlebar-action[aria-expanded="true"] {
+  .font-size-stepper button:hover:not(:disabled) {
     color: var(--text);
     background: var(--hover);
   }
 
-  .titlebar-action :global(svg) {
-    width: 17px;
-    height: 17px;
-    stroke-width: 1.8px;
+  .font-size-stepper button:disabled {
+    color: var(--disabled);
+    cursor: default;
   }
 
-  .titlebar-divider {
-    width: 1px;
-    height: 24px;
-    margin: 0 2px 0 4px;
-    background: var(--line);
-  }
-
-  .settings-panel {
-    position: absolute;
-    top: calc(var(--titlebar-height) + 8px);
-    right: 15px;
-    z-index: 30;
-    width: min(324px, calc(100vw - 24px));
-    max-height: calc(100vh - var(--titlebar-height) - 20px);
-    padding: 18px 18px 16px;
-    overflow-y: auto;
-    border: 1px solid var(--line);
-    border-radius: 12px;
+  .font-size-stepper output {
+    min-width: 54px;
     color: var(--text);
-    background: var(--surface);
-    box-shadow: var(--shadow);
-    transform-origin: top right;
+    font-size: 15px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
   }
 
-  .settings-panel h2 {
-    margin: 0;
-    padding-bottom: 13px;
-    border-bottom: 1px solid var(--line);
-    font-size: 17px;
-    font-weight: 650;
-    line-height: 22px;
-  }
-
-  .settings-section {
+  .settings-preview-wrap {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    margin-top: 14px;
-    padding-top: 13px;
-    border-top: 1px solid var(--line);
-  }
-
-  .settings-section:first-of-type {
-    border-top: 0;
-    margin-top: 14px;
-    padding-top: 0;
-  }
-
-  .settings-section h3 {
-    margin: 0 0 1px;
-    color: var(--text);
-    font-size: 13px;
-    font-weight: 650;
-    line-height: 20px;
-  }
-
-  .settings-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
     gap: 10px;
-    min-width: 0;
-    min-height: 36px;
-    color: var(--text);
+    margin-top: 24px;
+  }
+
+  .settings-preview-wrap h4 {
+    margin: 0;
+    color: var(--muted);
     font-size: 14px;
     font-weight: 500;
   }
 
-  .settings-row > span,
-  .settings-copy {
-    min-width: 0;
-  }
-
-  .settings-row select,
-  .settings-button {
-    flex: 0 0 112px;
-    width: 112px;
-    height: 34px;
-    padding: 0 10px;
-    border: 1px solid var(--line-strong);
-    border-radius: var(--radius-control);
+  .settings-preview {
+    width: 100%;
+    padding: 18px 20px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
     color: var(--text);
-    background: var(--surface);
-    font-size: 13px;
+    background: var(--reading-surface);
+    font-weight: 400;
+    overflow-wrap: anywhere;
   }
 
-  .settings-row select {
-    cursor: pointer;
+  .settings-preview h5 {
+    margin: 0 0 0.55em;
+    font-size: 1.2em;
+    font-weight: 600;
   }
 
-  .settings-button {
-    cursor: pointer;
+  .settings-preview p {
+    margin: 0 0 0.7em;
   }
 
-  .settings-button:hover {
-    border-color: var(--accent);
-    background: var(--accent-soft);
+  .settings-preview p:last-child {
+    margin-bottom: 0;
   }
 
-  .settings-row select {
-    transition:
-      border-color var(--duration-interaction) var(--ease-out),
-      background-color var(--duration-interaction) var(--ease-out),
-      box-shadow var(--duration-interaction) var(--ease-out);
-  }
-
-  .settings-row select:focus-visible {
-    border-color: var(--accent);
-    outline: 0;
-    box-shadow: 0 0 0 2px var(--accent-soft);
+  .settings-preview code {
+    padding: 0.15em 0.35em;
+    border-radius: 4px;
+    background: var(--surface-muted);
+    font-family: "Cascadia Code", Consolas, monospace;
+    font-size: 0.9em;
   }
 
   .settings-switch-row {
-    min-height: 34px;
+    min-height: 56px;
+    cursor: pointer;
   }
 
   .settings-switch-row input[type="checkbox"] {
     position: relative;
-    flex: 0 0 42px;
-    width: 42px;
+    flex: 0 0 40px;
+    width: 40px;
     height: 24px;
     margin: 0;
     appearance: none;
@@ -3559,22 +4358,20 @@
     border-radius: 999px;
     background: var(--line-strong);
     cursor: pointer;
-    transition:
-      background-color var(--duration-interaction) var(--ease-out),
-      border-color var(--duration-interaction) var(--ease-out);
+    transition: background-color 120ms var(--ease-out), border-color 120ms var(--ease-out);
   }
 
   .settings-switch-row input[type="checkbox"]::after {
     position: absolute;
-    top: 3px;
-    left: 3px;
-    width: 16px;
-    height: 16px;
+    top: 2px;
+    left: 2px;
+    width: 18px;
+    height: 18px;
     border-radius: 50%;
     background: #ffffff;
     box-shadow: 0 1px 2px rgba(25, 42, 64, 0.22);
     content: "";
-    transition: transform var(--duration-interaction) var(--ease-out);
+    transition: transform 120ms var(--ease-out);
   }
 
   .settings-switch-row input[type="checkbox"]:checked {
@@ -3583,7 +4380,7 @@
   }
 
   .settings-switch-row input[type="checkbox"]:checked::after {
-      transform: translateX(18px);
+    transform: translateX(16px);
   }
 
   .settings-switch-row input[type="checkbox"]:focus-visible {
@@ -3591,33 +4388,85 @@
     outline-offset: 2px;
   }
 
-  .settings-copy {
+  .settings-file-setting {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: center;
+    gap: 12px 24px;
+    min-height: 72px;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .settings-file-setting > .settings-label {
+    grid-column: 1;
+  }
+
+  .settings-file-setting > .settings-button {
+    justify-self: end;
+  }
+
+  .settings-folder-control {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    grid-column: 2;
+    width: 100%;
+    min-width: 0;
+    max-width: 560px;
+    justify-self: end;
+  }
+
+  .settings-path {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    color: var(--muted);
+    font-size: 14px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .settings-button {
+    flex: 0 0 auto;
+  }
+
+  .settings-about-brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0 16px;
+  }
+
+  .settings-about-mark {
+    display: grid;
+    flex: 0 0 40px;
+    width: 40px;
+    height: 40px;
+    place-items: center;
+    border-radius: 8px;
+    color: var(--accent-foreground);
+    background: var(--accent);
+  }
+
+  .settings-about-brand > div {
     display: flex;
     flex-direction: column;
-    gap: 1px;
+    gap: 2px;
   }
 
-  .settings-copy small,
-  .settings-about small {
+  .settings-about-brand strong {
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  .settings-about-version {
+    display: flex;
+    justify-content: space-between;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
     color: var(--muted);
-    font-size: 13px;
-    font-weight: 450;
-  }
-
-  .settings-association-row {
-    min-height: 36px;
-  }
-
-  .settings-file-section {
-    gap: 3px;
-  }
-
-  .settings-about .settings-row {
-    min-height: 32px;
-  }
-
-  .settings-about {
-    gap: 8px;
+    font-size: 14px;
   }
 
   .drag-region {
@@ -3626,66 +4475,84 @@
 
   .tab-strip {
     display: flex;
-    flex: 0 1 auto;
-    align-items: end;
-    min-width: 0;
-    max-width: calc(100% - var(--window-controls-width) - 44px);
+    flex: 1 1 180px;
+    align-items: center;
+    min-width: 112px;
+    max-width: none;
     gap: 2px;
-    padding: 5px 0 0 8px;
+    height: 100%;
+    padding: 0 4px;
+    overflow: visible;
+  }
+
+  .tab-scroll-area {
+    display: flex;
+    flex: 1 1 auto;
+    align-items: center;
+    min-width: 0;
+    height: 100%;
     overflow-x: auto;
     overflow-y: hidden;
     scrollbar-width: none;
   }
 
-  .tab-strip::-webkit-scrollbar {
+  .tab-scroll-area::-webkit-scrollbar {
     display: none;
+  }
+
+  .tab-strip.drag-region,
+  .tab-scroll-area {
+    -webkit-app-region: drag;
+  }
+
+  .tab-list,
+  .tab-overflow-wrap {
+    -webkit-app-region: no-drag;
   }
 
   .tab-list {
     display: flex;
     flex: 0 0 auto;
-    align-items: end;
-    min-width: 0;
-    height: 100%;
-    gap: 2px;
-  }
-
-  .home-page-button {
-    display: inline-flex;
-    flex: 0 0 30px;
-    align-self: flex-end;
     align-items: center;
-    justify-content: center;
-    width: 30px;
-    height: 36px;
-    margin-left: 2px;
+    min-width: 0;
+    width: max-content;
+    max-width: 100%;
+    height: 100%;
+    margin-inline: 0;
+    gap: 2px;
+    -webkit-app-region: no-drag;
+  }
+
+  .tab-overflow-wrap {
+    position: relative;
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    height: 100%;
+  }
+
+  .tab-overflow-trigger {
+    flex: 0 0 32px;
+    width: 32px;
     padding: 0;
-    border: 0;
-    border-radius: var(--radius-control);
-    color: var(--muted);
-    background: transparent;
-    cursor: pointer;
   }
 
-  .home-page-button:hover {
-    color: var(--text);
-    background: var(--hover);
-  }
-
-  .home-page-button:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: -2px;
+  .tab-overflow-trigger :global(svg) {
+    width: 16px;
+    height: 16px;
   }
 
   .tab-shell {
     position: relative;
     display: flex;
     align-items: center;
-    flex: 0 1 190px;
-    min-width: 110px;
+    flex: 0 0 200px;
+    min-width: 112px;
     max-width: 220px;
     height: 36px;
-    border-radius: 8px 8px 0 0;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: 6px 6px 0 0;
     color: var(--muted);
     transition: color var(--duration-interaction) var(--ease-out), background-color var(--duration-interaction) var(--ease-out);
   }
@@ -3693,20 +4560,42 @@
   .tab-shell.selected {
     color: var(--text);
     background: var(--reading-surface);
-    box-shadow: 0 1px 0 var(--reading-surface);
+    border-bottom-color: var(--accent);
   }
 
   .tab-shell:not(.selected):hover {
     background: var(--hover);
   }
 
+  .tab-shell.drop-before::after,
+  .tab-shell.drop-after::after {
+    position: absolute;
+    top: 5px;
+    bottom: 5px;
+    z-index: 1;
+    width: 2px;
+    border-radius: 2px;
+    background: var(--accent);
+    content: "";
+    pointer-events: none;
+  }
+
+  .tab-shell.drop-before::after {
+    left: -2px;
+  }
+
+  .tab-shell.drop-after::after {
+    right: -2px;
+  }
+
   .tab-button,
   .tab-close,
+  .titlebar-preferences button,
   .window-controls button,
   .tool-button,
   .search-step,
   .search-close,
-  .remove-recent {
+  .settings-close {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -3721,6 +4610,7 @@
     flex: 1;
     min-width: 0;
     height: 100%;
+    container-type: inline-size;
     gap: 8px;
     padding: 0 4px 0 11px;
     border-radius: inherit;
@@ -3737,12 +4627,46 @@
     color: var(--accent);
   }
 
-  .tab-name {
+  .tab-copy {
+    display: flex;
+    flex: 0 1 auto;
+    align-items: center;
+    min-width: 0;
     overflow: hidden;
-    font-size: 15px;
-    font-weight: 550;
+    gap: 4px;
+  }
+
+  .tab-copy.has-directory-hint {
+    flex: 1 1 auto;
+    gap: 2px;
+  }
+
+  .tab-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    font-size: 14px;
+    font-weight: 400;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .tab-directory-hint {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 76px;
+    overflow: hidden;
+    color: var(--subtle);
+    font-size: 13px;
+    font-weight: 400;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  @container (max-width: 136px) {
+    .tab-directory-hint {
+      display: none;
+    }
   }
 
   .dirty-indicator,
@@ -3758,28 +4682,34 @@
   }
 
   .external-indicator {
-    background: #d18b2c;
+    background: var(--warning);
   }
 
-  .tab-button[draggable="true"] {
-    cursor: grab;
-  }
-
-  .tab-button[draggable="true"]:active {
-    cursor: grabbing;
+  .tab-shell .tab-button {
+    cursor: default;
   }
 
   .tab-close {
-    flex: 0 0 25px;
-    width: 24px;
-    height: 24px;
+    flex: 0 0 32px;
+    width: 32px;
+    height: 32px;
     margin-right: 5px;
     border-radius: var(--radius-control);
-    opacity: 0.72;
+    opacity: 0;
   }
 
-  .tab-close:hover,
-  .remove-recent:hover {
+  .app-shell .tab-shell .tab-button:focus-visible:not(:disabled),
+  .app-shell .tab-shell .tab-close:focus-visible:not(:disabled) {
+    outline-offset: -2px;
+  }
+
+  .tab-shell.selected .tab-close,
+  .tab-shell:hover .tab-close,
+  .tab-shell:focus-within .tab-close {
+    opacity: 1;
+  }
+
+  .tab-close:hover {
     color: var(--text);
     background: var(--hover);
     opacity: 1;
@@ -3810,15 +4740,18 @@
     to { transform: translateX(265%); }
   }
 
+  .titlebar-preferences button:hover,
   .window-controls button:hover,
   .tool-button:hover:not(:disabled),
-  .search-step:hover,
-  .search-close:hover {
+  .search-step:hover:not(:disabled),
+  .search-close:hover:not(:disabled),
+  .settings-close:hover:not(:disabled) {
     color: var(--text);
     background: var(--hover);
   }
 
   .tool-button[aria-pressed="true"]:not(:disabled) {
+    --button-pressed-bg: var(--accent-soft);
     color: var(--accent);
     background: var(--accent-soft);
   }
@@ -3829,46 +4762,120 @@
     align-self: stretch;
   }
 
+  .titlebar-preferences,
   .window-controls {
     display: flex;
-    flex: 0 0 var(--window-controls-width);
+    flex: 0 0 auto;
     align-items: stretch;
     justify-content: flex-end;
   }
 
+  .titlebar-preferences {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .window-controls {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .titlebar-preferences {
+    align-items: center;
+    padding: 0 4px;
+  }
+
+  .titlebar-preferences button {
+    color: var(--muted);
+  }
+
   .window-controls button {
     width: 46px;
+    flex: 0 0 46px;
     color: var(--muted);
+  }
+
+  .titlebar-preferences .window-mode-toggle,
+  .titlebar-preferences .theme-toggle {
+    align-self: center;
+    height: 32px;
+    border-radius: var(--radius-control);
+  }
+
+  .titlebar-preferences .window-mode-toggle {
+    display: inline-flex;
+    flex: 0 0 76px;
+    align-items: center;
+    justify-content: center;
+    width: 76px;
+    gap: 6px;
+    margin: 0 4px;
+    padding: 0 7px;
+    font-size: 14px;
+  }
+
+  .titlebar-preferences .window-mode-toggle[aria-pressed="true"] {
+    color: var(--accent);
+    background: var(--selected-bg);
+  }
+
+  .titlebar-preferences .theme-toggle {
+    flex: 0 0 38px;
+    width: 38px;
+    margin: 0 4px;
+  }
+
+  .window-controls button:focus-visible {
+    outline-offset: -2px;
+  }
+
+  .window-controls .close-window {
+    --button-pressed-bg: var(--window-close-pressed-bg);
   }
 
   .window-controls .close-window:hover {
     color: #fff;
-    background: #d8343d;
+    background: var(--window-close-hover-bg);
+  }
+
+  .window-controls .close-window:hover:focus-visible {
+    outline-color: #fff;
   }
 
   .toolbar {
     position: relative;
     z-index: 5;
     display: flex;
+    grid-column: 1;
+    grid-row: 1;
     align-items: center;
-    justify-content: space-between;
+    gap: 12px;
     min-width: 0;
-    padding: 0 var(--toolbar-inline-padding);
-    border-bottom: 1px solid var(--line);
-    background: var(--surface);
+    padding: 0 8px;
+    background: transparent;
     box-shadow: none;
+  }
+
+  .titlebar-tabs-row {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    display: flex;
+    min-width: 0;
+    height: 37px;
+    border-top: 1px solid var(--line);
   }
 
   .toolbar-left,
   .toolbar-right {
     display: flex;
+    flex: 0 0 auto;
     align-items: center;
     min-width: 0;
-    gap: 5px;
+    gap: 3px;
   }
 
   .toolbar-left {
-    gap: 8px;
+    gap: 3px;
   }
 
   .menu-wrap {
@@ -3881,7 +4888,7 @@
     align-items: center;
     justify-content: center;
     gap: 6px;
-    height: 34px;
+    height: 32px;
     padding: 0 9px;
     border: 0;
     border-radius: var(--radius-control);
@@ -3896,72 +4903,310 @@
   }
 
   .menu-trigger[aria-expanded="true"] {
+    --button-pressed-bg: var(--accent-soft);
     color: var(--accent);
     background: var(--accent-soft);
   }
 
   .menu-trigger {
     font-size: 15px;
-    font-weight: 560;
-  }
-
-  .toolbar-separator {
-    width: 1px;
-    height: 18px;
-    margin: 0 5px;
-    background: var(--line);
+    font-weight: 400;
   }
 
   .toolbar-right {
-    gap: 4px;
+    flex: 0 0 auto;
+    min-width: 0;
+    gap: 12px;
+  }
+
+  .document-navigation-actions {
+    display: flex;
+    flex: 0 1 auto;
+    align-items: center;
+    min-width: 0;
+    gap: 2px;
   }
 
   .tool-button {
-    width: 34px;
+    width: 32px;
     padding: 0;
   }
 
+  .tool-button-label {
+    width: auto;
+    min-width: 32px;
+    gap: 7px;
+    padding: 0 9px;
+    font-size: 14px;
+  }
+
+  .tool-button-label[aria-pressed="true"] {
+    color: var(--accent);
+    background: var(--selected-bg);
+  }
+
+  .tool-button-label[aria-pressed="true"]:not(:disabled) {
+    --button-pressed-bg: var(--selected-bg);
+  }
+
+  .tool-button-label[aria-expanded="true"] {
+    color: var(--accent);
+    background: var(--selected-bg);
+  }
+
+  .tool-button-label[aria-expanded="true"]:not(:disabled) {
+    --button-pressed-bg: var(--selected-bg);
+  }
+
+  .tool-button-label span {
+    white-space: nowrap;
+  }
+
+  .app-shell .settings-nav button:focus-visible,
+  .app-shell .settings-segmented button:focus-visible,
+  .app-shell .font-size-stepper button:focus-visible,
+  .app-shell .window-mode-toggle:focus-visible,
+  .app-shell .theme-toggle:focus-visible {
+    outline-offset: -2px;
+  }
+
+  .app-shell .toolbar .menu-trigger:focus-visible,
+  .app-shell .toolbar .tool-button:focus-visible,
+  .app-shell .toolbar .search-step:focus-visible,
+  .app-shell .toolbar .search-close:focus-visible {
+    outline-offset: -2px;
+  }
+
   .tool-button:disabled {
-    color: var(--subtle);
+    color: var(--disabled);
     cursor: default;
-    opacity: 0.5;
+    background: transparent;
   }
 
   .dropdown-menu {
     position: absolute;
     top: 38px;
     left: 0;
-    z-index: 10;
+    z-index: 30;
     display: flex;
     flex-direction: column;
     min-width: 236px;
+    max-height: calc(100vh - 64px);
     padding: 6px;
-    border: 1px solid var(--line);
-    border-radius: 9px;
-    background: var(--surface);
-    box-shadow: var(--shadow);
-    transform-origin: top left;
-  }
-
-  .tab-context-menu {
-    position: fixed;
-    z-index: 18;
-    display: flex;
-    flex-direction: column;
-    width: 190px;
-    padding: 5px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     border: 1px solid var(--line);
     border-radius: var(--radius-popover);
     color: var(--text);
     background: var(--surface);
-    box-shadow: var(--shadow), inset 0 1px 0 var(--surface-highlight);
+    box-shadow: var(--shadow-popover);
+    transform-origin: top left;
+  }
+
+  .search-popover {
+    position: absolute;
+    top: 38px;
+    right: 0;
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+    width: min(360px, calc(100vw - 24px));
+    max-height: calc(100vh - 64px);
+    padding: 0;
+    overflow: visible;
+    box-sizing: border-box;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-popover);
+    color: var(--text);
+    background: var(--surface);
+    box-shadow: var(--shadow-popover);
+    transform-origin: top right;
+  }
+
+  .search-popover-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 44px;
+    padding: 0 8px 0 14px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .search-popover-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text);
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  .search-popover-title :global(svg) {
+    color: var(--accent);
+  }
+
+  .search-popover-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+  }
+
+  .search-popover .search-box {
+    width: 100%;
+    height: 38px;
+    padding: 0 8px 0 10px;
+    gap: 7px;
+    border-color: var(--line-strong);
+    border-radius: var(--radius-control);
+    background: var(--surface);
+  }
+
+  .search-popover .search-box:focus-within {
+    border-color: var(--accent);
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  .search-popover .search-box > :global(svg) {
+    flex: 0 0 16px;
+    color: var(--muted);
+  }
+
+  .search-popover .search-box input:focus {
+    outline: 0;
+  }
+
+  .search-popover-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 32px;
+    gap: 8px;
+  }
+
+  .search-popover-footer .search-count {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 84px;
+    font-size: 14px;
+    text-align: left;
+  }
+
+  .search-popover-footer .search-count-empty {
+    visibility: hidden;
+  }
+
+  .search-popover-navigation {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: auto;
+  }
+
+  .tab-overflow-menu {
+    top: 38px;
+    right: 0;
+    left: auto;
+    width: min(360px, calc(100vw - 20px));
+    box-sizing: border-box;
+    max-height: min(420px, calc(100vh - 64px));
+    transform-origin: top right;
+  }
+
+  .dropdown-menu .tab-overflow-item {
+    align-items: center;
+    min-height: 58px;
+    gap: 10px;
+    padding: 6px 9px;
+  }
+
+  .dropdown-menu .tab-overflow-item > :global(svg) {
+    align-self: flex-start;
+    margin-top: 5px;
+  }
+
+  .dropdown-menu .tab-overflow-item > .tab-overflow-copy {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    overflow: hidden;
+    white-space: normal;
+  }
+
+  .tab-overflow-title-line {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .tab-overflow-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text);
+    font-size: 15px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .tab-overflow-status {
+    flex: 0 1 auto;
+    max-width: 48%;
+    overflow: hidden;
+    color: var(--muted);
+    font-size: 14px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .tab-overflow-path {
+    display: block;
+    width: 100%;
+    overflow: hidden;
+    color: var(--subtle);
+    direction: rtl;
+    font-size: 14px;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    unicode-bidi: isolate;
+  }
+
+  .tab-overflow-path > bdi {
+    direction: ltr;
+  }
+
+  .dropdown-menu .tab-overflow-item[aria-current="page"] {
+    background: var(--selected);
+  }
+
+  .dropdown-menu .tab-overflow-item[aria-current="page"] > :global(svg) {
+    color: var(--accent);
+  }
+
+  .tab-context-menu {
+    position: fixed;
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+    width: 224px;
+    padding: 6px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-popover);
+    color: var(--text);
+    background: var(--surface);
+    box-shadow: var(--shadow-popover);
     transform-origin: top left;
   }
 
   .tab-context-menu button {
     display: flex;
     align-items: center;
-    min-height: 36px;
+    min-height: 32px;
     padding: 0 10px;
     border: 0;
     border-radius: var(--radius-control);
@@ -3972,15 +5217,21 @@
     cursor: pointer;
   }
 
-  .tab-context-menu button:hover {
+  .tab-context-menu button:hover:not(:disabled),
+  .tab-context-menu button:focus-visible:not(:disabled) {
     background: var(--hover);
+  }
+
+  .app-shell .tab-context-menu button:focus-visible:not(:disabled),
+  .app-shell .dropdown-menu button:focus-visible:not(:disabled) {
+    outline-offset: -2px;
   }
 
   .dropdown-menu button {
     display: flex;
     align-items: center;
     gap: 9px;
-    min-height: 36px;
+    min-height: 32px;
     padding: 0 9px;
     border: 0;
     border-radius: var(--radius-control);
@@ -3990,13 +5241,17 @@
     cursor: pointer;
   }
 
-  .dropdown-menu button:hover {
+  .dropdown-menu button:hover:not(:disabled),
+  .dropdown-menu button:focus-visible:not(:disabled) {
     background: var(--hover);
   }
 
+  :global(.app-shell .editor-context-menu button:focus-visible:not(:disabled)) {
+    outline-offset: -2px;
+  }
+
   .dropdown-menu button:disabled {
-    color: var(--subtle);
-    opacity: 0.6;
+    color: var(--disabled);
     cursor: default;
   }
 
@@ -4012,6 +5267,14 @@
     color: var(--muted);
   }
 
+  .dropdown-menu button[role="menuitemradio"][aria-checked="true"] :global(svg) {
+    color: var(--accent);
+  }
+
+  .dropdown-menu button:disabled :global(svg) {
+    color: var(--disabled);
+  }
+
   .toolbar :global(svg) {
     flex: 0 0 auto;
     width: 16px;
@@ -4019,22 +5282,42 @@
     stroke-width: 1.8px;
   }
 
-  .toolbar .menu-trigger :global(svg) {
-    width: 14px;
-    height: 14px;
+  .toolbar .menu-trigger :global(svg),
+  .toolbar .settings-toggle :global(svg) {
+    width: 16px;
+    height: 16px;
+    stroke-width: 1.8px;
   }
 
-  .dropdown-menu button span:nth-child(2) {
+  .dropdown-menu button:not(.recent-menu-item) > span:nth-child(2) {
     flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
+  .tab-overflow-menu .tab-overflow-item > .tab-overflow-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow: hidden;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
   .dropdown-menu kbd {
     color: var(--subtle);
-    font-size: 15px;
+    font-size: 14px;
     font-family: inherit;
+  }
+
+  .dropdown-menu button[role="menuitemcheckbox"][aria-checked="true"] kbd {
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  .dropdown-menu button:disabled kbd {
+    color: var(--disabled);
   }
 
   .menu-divider {
@@ -4046,12 +5329,101 @@
   .menu-label {
     padding: 5px 9px 4px;
     color: var(--subtle);
-    font-size: 13px;
-    font-weight: 650;
+    font-size: 14px;
+    font-weight: 500;
+  }
+
+  .dropdown-menu .recent-menu-empty {
+    padding: 8px 9px 10px;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.45;
   }
 
   .dropdown-menu .recent-menu-item {
+    flex: 1;
     min-width: 0;
+    min-height: 68px;
+    gap: 10px;
+    padding: 6px 9px;
+  }
+
+  .dropdown-menu .recent-menu-row {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+    border-radius: var(--radius-control);
+  }
+
+  .dropdown-menu .recent-menu-remove {
+    display: grid;
+    flex: 0 0 32px;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    min-height: 32px;
+    padding: 0;
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .dropdown-menu .recent-menu-remove[aria-hidden="false"],
+  .dropdown-menu .recent-menu-row:hover .recent-menu-remove,
+  .dropdown-menu .recent-menu-row:focus-within .recent-menu-remove {
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .dropdown-menu .recent-menu-remove:hover,
+  .dropdown-menu .recent-menu-remove:focus-visible {
+    background: var(--hover);
+  }
+
+  .dropdown-menu:has(.recent-menu-item) {
+    width: min(360px, calc(100vw - 20px));
+    box-sizing: border-box;
+  }
+
+  .dropdown-menu .recent-menu-copy {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    align-items: flex-start;
+    min-width: 0;
+    overflow: hidden;
+    white-space: normal;
+  }
+
+  .dropdown-menu .recent-menu-name,
+  .dropdown-menu .recent-menu-path {
+    display: block;
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dropdown-menu .recent-menu-name {
+    color: var(--text);
+    font-size: 15px;
+    font-weight: 500;
+  }
+
+  .dropdown-menu .recent-menu-path {
+    color: var(--subtle);
+    direction: rtl;
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.4;
+    text-align: left;
+    unicode-bidi: isolate;
+  }
+
+  .dropdown-menu .recent-menu-path > bdi {
+    direction: ltr;
   }
 
   .dropdown-menu .muted-menu-item {
@@ -4067,8 +5439,8 @@
     display: flex;
     align-items: center;
     gap: 7px;
-    width: min(420px, calc(100vw - 24px));
-    height: 36px;
+    width: min(400px, calc(100vw - 24px));
+    height: 44px;
     padding: 0 5px 0 10px;
     box-sizing: border-box;
     border: 1px solid var(--line-strong);
@@ -4077,26 +5449,19 @@
     background: var(--surface);
   }
 
-  .search-box:focus-within {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px var(--accent-soft);
-  }
-
-  .floating-search-box {
-    position: absolute;
-    top: calc(100% + 6px);
-    right: var(--toolbar-inline-padding);
-    z-index: 20;
-    box-shadow: var(--shadow);
-    transform-origin: top right;
+  @media (max-width: 1172px) {
+    .tab-shell {
+      flex: 0 1 200px;
+    }
   }
 
   .search-box input {
     flex: 1;
     width: 100px;
     min-width: 48px;
-    padding: 0;
+    padding: 0 5px;
     border: 0;
+    border-radius: var(--radius-control);
     outline: 0;
     color: var(--text);
     background: transparent;
@@ -4107,31 +5472,60 @@
   }
 
   .search-count {
-    flex: 0 0 auto;
+    flex: 0 0 80px;
+    width: 80px;
     color: var(--subtle);
     font-size: 15px;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
     white-space: nowrap;
   }
 
   .search-step,
-  .search-close {
-    flex: 0 0 28px;
-    width: 28px;
-    height: 28px;
+  .search-close,
+  .settings-close {
+    flex: 0 0 32px;
+    width: 32px;
+    height: 32px;
     border-radius: var(--radius-control);
     color: var(--muted);
   }
 
+  .settings-close {
+    margin-left: auto;
+  }
+
+  .search-step:disabled {
+    color: var(--disabled);
+    background: transparent;
+    cursor: default;
+  }
+
   .reader-layout {
+    position: relative;
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     min-width: 0;
     min-height: 0;
-    background: var(--window-bg);
+    background: var(--reading-surface);
+  }
+
+  .reader-layout.dragging-files::after {
+    position: absolute;
+    inset: 12px;
+    z-index: 60;
+    display: block;
+    border: 2px dashed var(--accent);
+    border-radius: 8px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--window-bg) 96%, var(--accent) 4%);
+    content: "";
+    pointer-events: none;
+    transition: background-color 100ms var(--ease-out), border-color 100ms var(--ease-out);
   }
 
   .reader-layout.with-outline {
-    grid-template-columns: minmax(176px, var(--outline-width)) 8px minmax(0, 1fr);
+    grid-template-columns: minmax(200px, var(--outline-width)) 8px minmax(0, 1fr);
   }
 
   .reader-layout.external-changed {
@@ -4148,7 +5542,7 @@
     padding: 6px 18px;
     border-bottom: 1px solid var(--line);
     color: var(--text);
-    background: var(--accent-soft);
+    background: var(--warning-bg);
     font-size: 15px;
     line-height: 1.45;
   }
@@ -4172,7 +5566,17 @@
     flex-direction: column;
     min-width: 0;
     min-height: 0;
-    background: var(--surface);
+    background: var(--sidebar-bg);
+  }
+
+  .outline-header {
+    display: flex;
+    flex: 0 0 44px;
+    align-items: center;
+    padding: 0 16px;
+    color: var(--text);
+    font-size: 15px;
+    font-weight: 600;
   }
 
   .outline-splitter {
@@ -4208,7 +5612,7 @@
 
   .outline-empty {
     margin: 0;
-    padding: 10px 20px;
+    padding: 10px 16px;
     color: var(--subtle);
     font-size: 14px;
     line-height: 1.6;
@@ -4219,26 +5623,28 @@
     flex-direction: column;
     gap: 2px;
     overflow: auto;
-    padding: 3px 8px 24px 9px;
+    padding: 0 12px 24px;
   }
 
   .outline-item {
-    display: block;
+    display: -webkit-box;
     width: 100%;
     min-width: 0;
-    min-height: 36px;
-    padding: 6px 8px 6px var(--heading-indent);
+    min-height: 32px;
+    padding: 5px 6px 5px var(--heading-indent);
     overflow: hidden;
     border: 0;
     border-radius: var(--radius-control);
     color: var(--muted);
     background: transparent;
-    font-size: 15px;
-    font-weight: 500;
-    line-height: 1.45;
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.4;
     text-align: left;
     text-overflow: ellipsis;
-    white-space: nowrap;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
     cursor: pointer;
   }
 
@@ -4248,13 +5654,20 @@
   }
 
   .outline-item.current {
+    --button-pressed-bg: var(--selected-bg);
     color: var(--accent);
-    background: var(--accent-soft);
+    background: var(--selected-bg);
     font-weight: 600;
-    box-shadow: inset 2px 0 0 var(--accent);
   }
 
-  .home-screen,
+  .empty-workspace {
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    padding: 0;
+    background: var(--window-bg);
+  }
+
   .document-state {
     display: flex;
     align-items: center;
@@ -4262,24 +5675,6 @@
     min-width: 0;
     min-height: 0;
     overflow: auto;
-  }
-
-  .home-screen {
-    padding: 48px 28px;
-  }
-
-  .home-content {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    width: min(100%, 520px);
-    margin: auto;
-    text-align: center;
-    transform: translateY(-24px);
-  }
-
-  .home-content.has-recent {
-    transform: translateY(-30px);
   }
 
   .state-icon {
@@ -4294,234 +5689,87 @@
     background: var(--surface);
   }
 
-  .home-actions {
-    display: flex;
-    flex-wrap: wrap;
+  .primary-button,
+  .secondary-button,
+  .settings-button,
+  .danger-button {
+    display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 10px;
-    width: 100%;
-  }
-
-  .home-action-button {
-    display: inline-flex;
-    flex: 1 1 0;
-    align-items: center;
-    justify-content: space-between;
-    min-width: 0;
-    min-height: 44px;
-    padding: 0 12px 0 14px;
-    border: 1px solid var(--line-strong);
-    border-radius: 8px;
-    color: var(--text);
-    background: var(--surface);
+    min-height: 36px;
+    margin: 0;
+    padding: 0 14px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-control);
     font-size: 15px;
-    font-weight: 600;
-    box-shadow: 0 1px 2px rgba(31, 49, 73, 0.045);
+    font-weight: 500;
     cursor: pointer;
-    transition:
-      color var(--duration-interaction) var(--ease-out),
-      background-color var(--duration-interaction) var(--ease-out),
-      border-color var(--duration-interaction) var(--ease-out),
-      transform var(--button-transform-duration) var(--ease-out),
-      box-shadow var(--duration-interaction) var(--ease-out);
   }
 
-  .home-action-copy {
-    display: inline-flex;
-    align-items: center;
-    min-width: 0;
-    gap: 9px;
+  .primary-button {
+    --button-pressed-bg: var(--accent-pressed);
+    border-color: var(--accent);
+    color: var(--accent-foreground);
+    background: var(--accent);
+  }
+
+  .save-close-button {
+    gap: 8px;
+    min-width: 128px;
     white-space: nowrap;
   }
 
-  .home-action-button :global(svg) {
-    flex: 0 0 18px;
-    width: 18px;
-    height: 18px;
-    color: var(--accent);
-    stroke-width: 1.8px;
+  .button-spinner {
+    flex: 0 0 14px;
+    width: 14px;
+    height: 14px;
+    box-sizing: border-box;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: spin 800ms linear infinite;
   }
 
-  .home-action-button kbd {
-    flex: 0 0 auto;
-    padding: 4px 5px;
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    color: var(--subtle);
-    background: var(--surface-muted);
-    font-family: inherit;
-    font-size: 12px;
-    font-weight: 500;
-    line-height: 1;
-  }
-
-  .home-action-button:hover {
-    border-color: color-mix(in srgb, var(--accent) 40%, var(--line-strong));
-    background: var(--accent-soft);
-  }
-
-  .primary-button,
-  .secondary-button {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 9px;
-    min-height: 44px;
-    padding: 0 18px;
-    border: 1px solid transparent;
-    border-radius: var(--radius-control);
-    color: var(--accent-foreground);
-    background: var(--accent);
-    font-size: 15px;
-    font-weight: 600;
-    cursor: pointer;
-  }
-
-  .primary-button:hover {
+  .primary-button:hover:not(:disabled) {
+    border-color: var(--accent-hover);
     background: var(--accent-hover);
   }
 
-  .recent-section {
-    width: 100%;
-    margin-top: 27px;
-    padding: 20px;
-    border: 1px solid var(--line);
-    border-radius: 16px;
-    background: var(--reading-surface);
-    box-shadow: 0 4px 20px rgba(31, 49, 73, 0.04);
-    text-align: left;
-  }
-
-  .recent-heading {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 9px;
-    padding: 0;
+  .secondary-button,
+  .settings-button {
+    --button-pressed-bg: var(--pressed);
+    border-color: transparent;
     color: var(--text);
-    font-size: 15px;
-    font-weight: 650;
-  }
-
-  .recent-heading button {
-    padding: 4px 0;
-    border: 0;
-    color: var(--subtle);
     background: transparent;
-    font-size: 15px;
-    cursor: pointer;
   }
 
-  .recent-heading button:hover {
-    color: var(--accent);
-  }
-
-  .recent-empty {
-    display: flex;
-    align-items: center;
-    min-height: 54px;
-    padding: 0 8px;
-    border-top: 1px solid var(--line);
-    color: var(--subtle);
-    font-size: 14px;
-  }
-
-  .recent-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0;
-    margin: 0;
-    padding: 0;
-    list-style: none;
-  }
-
-  .recent-list li {
-    display: flex;
-    align-items: center;
-    min-width: 0;
-    min-height: 68px;
-    padding: 3px 4px;
-    border-radius: 7px;
-    border-bottom: 1px solid var(--line);
-  }
-
-  .recent-list li:last-child {
-    border-bottom: 0;
-  }
-
-  .recent-list li:hover {
+  .secondary-button:hover:not(:disabled),
+  .settings-button:hover:not(:disabled) {
     background: var(--hover);
   }
 
-  .recent-file {
-    display: flex;
-    align-items: center;
-    flex: 1;
-    min-width: 0;
-    gap: 12px;
-    padding: 5px 8px;
-    border: 0;
-    color: var(--text);
-    background: transparent;
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .recent-file-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex: 0 0 26px;
-    width: 26px;
-    height: 28px;
-    color: var(--accent);
+  .danger-button {
+    --button-pressed-bg: var(--error-pressed-bg);
+    color: var(--error);
     background: transparent;
   }
 
-  .recent-file-icon :global(svg) {
-    width: 17px;
-    height: 17px;
-    stroke-width: 1.8px;
+  .danger-button:hover:not(:disabled) {
+    background: var(--error-bg);
   }
 
-  .recent-file-copy {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    gap: 3px;
+  .primary-button:disabled {
+    --button-pressed-bg: var(--surface-muted);
+    color: var(--disabled);
+    background: var(--surface-muted);
   }
 
-  .recent-file-copy strong,
-  .recent-file-copy small {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .recent-file-copy strong {
-    font-size: 15px;
-    font-weight: 650;
-  }
-
-  .recent-file-copy small {
-    color: var(--muted);
-    font-size: 13px;
-  }
-
-  .remove-recent {
-    flex: 0 0 26px;
-    width: 26px;
-    height: 26px;
-    border-radius: var(--radius-control);
-    color: var(--subtle);
-    opacity: 0;
-  }
-
-  .recent-list li:hover .remove-recent,
-  .recent-list li:focus-within .remove-recent,
-  .remove-recent:focus-visible {
-    opacity: 1;
+  .secondary-button:disabled,
+  .settings-button:disabled,
+  .danger-button:disabled {
+    --button-pressed-bg: transparent;
+    color: var(--disabled);
+    background: transparent;
   }
 
   .reader-viewport {
@@ -4529,82 +5777,36 @@
     min-height: 0;
     overflow: auto;
     overscroll-behavior: contain;
-    background: var(--window-bg);
+    background: var(--reading-surface);
+    scrollbar-gutter: stable;
     scrollbar-color: var(--line-strong) transparent;
     scrollbar-width: thin;
   }
 
-  .editor-split {
-    display: grid;
-    width: 100%;
-    height: 100%;
-    min-width: 0;
-    min-height: 0;
-    grid-template-rows: minmax(0, 1fr);
-    overflow: hidden;
-    background: var(--window-bg);
-  }
-
-  .editor-source-pane,
-  .editor-preview-pane {
-    min-width: 0;
-    min-height: 0;
-    overflow: hidden;
-  }
-
-  .editor-source-pane {
-    grid-row: 1;
-  }
-
-  .editor-split.preview-visible .editor-source-pane {
-    border-right: 1px solid var(--line);
-  }
-
-  .editor-preview-pane {
-    grid-row: 1;
-    background: var(--surface);
-  }
-
-  .editor-preview-pane .reader-viewport {
-    height: 100%;
-  }
-
-  .editor-splitter {
-    grid-row: 1;
-    position: relative;
-    z-index: 1;
-    width: 8px;
-    min-height: 0;
-    cursor: col-resize;
-    background: var(--window-bg);
-    touch-action: none;
-    user-select: none;
-  }
-
-  .editor-splitter::after {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: 3px;
-    width: 1px;
-    background: var(--line);
-    content: "";
-  }
-
-  .editor-splitter:hover::after,
-  .editor-splitter:focus-visible::after {
-    width: 2px;
-    background: var(--accent);
-  }
-
-  .editor-splitter:focus-visible {
+  .reader-viewport:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: -2px;
   }
 
-  .editor-viewport {
+  .editor-workspace {
+    display: flex;
+    flex-direction: column;
     width: 100%;
     height: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--window-bg);
+  }
+
+  .print-document {
+    display: none;
+  }
+
+  .editor-viewport {
+    flex: 1 1 auto;
+    width: 100%;
+    height: auto;
     min-width: 0;
     min-height: 0;
     overflow: hidden;
@@ -4612,18 +5814,16 @@
   }
 
   .reader-content {
-    width: min(calc(100% - 48px), 960px);
-    min-height: calc(100% - 40px);
-    margin: 20px auto;
-    padding: 52px clamp(44px, 7vw, 82px) 88px;
+    width: min(calc(100% - 64px), 720px);
+    min-height: 100%;
+    margin: 0 auto;
+    padding: 56px 0 96px;
     box-sizing: border-box;
-    border: 1px solid var(--line);
-    border-radius: 12px;
+    border: 0;
     color: var(--text);
-    background: var(--reading-surface);
-    box-shadow: 0 2px 8px rgba(31, 49, 73, 0.055);
+    background: transparent;
     font-size: var(--reader-font-size, 20px);
-    font-weight: 450;
+    font-weight: 400;
     line-height: var(--reader-line-height, 1.8);
     overflow-wrap: anywhere;
     user-select: text;
@@ -4637,38 +5837,73 @@
   .reader-content :global(h6) {
     color: var(--text);
     font-weight: 700;
-    line-height: 1.35;
-    letter-spacing: -0.025em;
-    scroll-margin-top: 42px;
+    line-height: 1.4;
+    letter-spacing: 0;
+    scroll-margin-top: 24px;
+  }
+
+  .reader-content :global(h1:first-child),
+  .reader-content :global(h2:first-child),
+  .reader-content :global(h3:first-child),
+  .reader-content :global(h4:first-child),
+  .reader-content :global(h5:first-child),
+  .reader-content :global(h6:first-child) {
+    margin-top: 0;
   }
 
   .reader-content :global(h1) {
-    margin: 0 0 30px;
+    margin: 1.4em 0 0.78em;
     font-size: 1.8em;
-    letter-spacing: -0.04em;
+    line-height: 1.3;
+    font-weight: 650;
   }
 
   .reader-content :global(h2) {
-    margin: 2.15em 0 0.8em;
-    padding-bottom: 0.35em;
-    border-bottom: 1px solid var(--line);
-    font-size: 1.33em;
+    margin: 1.43em 0 0.57em;
+    font-size: 1.4em;
+    line-height: 1.4;
+    font-weight: 650;
   }
 
   .reader-content :global(h3) {
-    margin: 1.8em 0 0.65em;
-    font-size: 1.11em;
+    margin: 1.33em 0 0.5em;
+    font-size: 1.2em;
+    line-height: 1.45;
+    font-weight: 650;
   }
 
   .reader-content :global(h4),
   .reader-content :global(h5),
   .reader-content :global(h6) {
-    margin: 1.5em 0 0.6em;
+    margin: 1.09em 0 0.45em;
+    line-height: 1.45;
+    font-weight: 600;
+  }
+
+  .reader-content :global(h5) {
+    margin: 1.2em 0 0.4em;
+    line-height: 1.5;
+    font-weight: 600;
+  }
+
+  .reader-content :global(h6) {
+    margin: 1em 0 0.4em;
+    color: var(--muted);
+    line-height: 1.5;
+    font-weight: 600;
+  }
+
+  .reader-content :global(h4) {
+    font-size: 1.1em;
+  }
+
+  .reader-content :global(h5),
+  .reader-content :global(h6) {
     font-size: 1em;
   }
 
   .reader-content :global(p) {
-    margin: 0 0 1.15em;
+    margin: 0 0 0.9em;
   }
 
   .reader-content :global(a) {
@@ -4714,12 +5949,12 @@
   }
 
   .reader-content :global(code) {
-    padding: 0.16em 0.38em;
+    padding: 0.15em 0.35em;
     border-radius: 4px;
     color: var(--text);
     background: var(--code-bg);
     font-family: "Cascadia Code", "Consolas", monospace;
-    font-size: 0.92em;
+    font-size: 0.9em;
   }
 
   .reader-content :global(pre) {
@@ -4755,18 +5990,19 @@
     position: absolute;
     top: 8px;
     right: 9px;
-    min-width: 54px;
-    height: 27px;
+    width: 64px;
+    height: 32px;
     padding: 0 8px;
-    border: 1px solid var(--line-strong);
+    box-sizing: border-box;
+    border: 1px solid transparent;
     border-radius: var(--radius-control);
     color: var(--muted);
-    background: var(--surface);
-    font-size: 15px;
+    background: transparent;
+    font-size: 14px;
     cursor: pointer;
   }
 
-  .reader-content :global(.reader-code-copy:hover) {
+  .reader-content :global(.reader-code-copy:hover:not(:disabled)) {
     color: var(--text);
     background: var(--hover);
   }
@@ -4852,24 +6088,32 @@
     color: var(--code-title);
   }
 
+  .reader-content :global(.reader-table-wrap) {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    margin: 1.4em 0 1.8em;
+    overscroll-behavior-x: contain;
+  }
+
   .reader-content :global(table) {
     width: 100%;
-    margin: 1.4em 0 1.8em;
     border-collapse: collapse;
-    font-size: 0.95em;
+    font-size: 0.9em;
   }
 
   .reader-content :global(th),
   .reader-content :global(td) {
-    padding: 9px 12px;
-    border: 1px solid var(--line-strong);
+    padding: 10px 14px;
+    border: 1px solid var(--line);
     text-align: left;
     vertical-align: top;
+    word-break: normal;
   }
 
   .reader-content :global(th) {
     background: var(--code-bg);
-    font-weight: 650;
+    font-weight: 600;
   }
 
   .reader-content :global(img) {
@@ -4900,33 +6144,38 @@
 
   .dark .reader-content :global(.hljs-comment),
   .dark .reader-content :global(.hljs-quote) {
-    color: #9ba6b5;
+    color: #a4adbd;
   }
 
   .dark .reader-content :global(.hljs-keyword),
   .dark .reader-content :global(.hljs-selector-tag),
   .dark .reader-content :global(.hljs-literal),
   .dark .reader-content :global(.hljs-name) {
-    color: #c9a4f2;
+    color: #ccaff2;
   }
 
   .dark .reader-content :global(.hljs-string),
   .dark .reader-content :global(.hljs-regexp),
   .dark .reader-content :global(.hljs-addition) {
-    color: #8bd2ac;
+    color: #92d3aa;
   }
 
   .dark .reader-content :global(.hljs-number),
   .dark .reader-content :global(.hljs-attr),
   .dark .reader-content :global(.hljs-variable),
   .dark .reader-content :global(.hljs-template-variable) {
-    color: #f0a978;
+    color: #eab48a;
   }
 
   .dark .reader-content :global(.hljs-title),
   .dark .reader-content :global(.hljs-section),
   .dark .reader-content :global(.hljs-built_in) {
-    color: #8fcaff;
+    color: #9ac5f0;
+  }
+
+  .reader-content :global(.reader-table-wrap:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   .document-state {
@@ -4955,20 +6204,39 @@
     to { transform: rotate(360deg); }
   }
 
+  .app-shell :global(button:active:not(:disabled)) {
+    background-color: var(--button-pressed-bg, var(--pressed));
+    transform: scale(0.97);
+    transition-duration: var(--duration-press-in);
+  }
+
+  .app-shell :global(button.primary-button:active:not(:disabled)) {
+    border-color: var(--accent-pressed);
+  }
+
   @media (prefers-reduced-motion: reduce) {
+    .app-shell {
+      --duration-theme: 80ms;
+    }
+
+    :global(.app-tooltip) {
+      transition: none;
+    }
+
     .tab-loading::after,
-    .loading-ring {
+    .loading-ring,
+    .button-spinner {
       animation: none !important;
     }
 
     .app-shell :global(button) {
       transition-property: color, background-color, border-color, opacity, box-shadow !important;
-      transition-duration: 100ms !important;
+      transition-duration: 80ms !important;
       transition-timing-function: ease !important;
     }
 
-    .app-shell :global(button:active:not(:disabled):not([draggable="true"])) {
-      transform: none !important;
+    .app-shell :global(button:active:not(:disabled)) {
+      transform: none;
     }
 
     .app-shell,
@@ -4978,16 +6246,114 @@
     .reader-layout,
     .outline-panel,
     .state-icon,
-    .recent-list li,
-    .recent-file-icon,
     .reader-viewport,
-    .editor-split,
-    .editor-preview-pane,
+    .editor-workspace,
     .editor-viewport,
+    .settings-workspace,
+    .settings-nav,
+    .settings-preview,
     .confirm-dialog,
     .search-box {
-      transition-duration: 100ms !important;
+      transition-duration: 80ms !important;
       transition-timing-function: ease !important;
+    }
+  }
+
+  @media (forced-colors: active) {
+    :global(.app-tooltip) {
+      border-color: ButtonBorder;
+      color: CanvasText;
+      background: Canvas;
+      box-shadow: none;
+    }
+
+    .app-shell,
+    .app-shell.dark {
+      --window-bg: Canvas;
+      --chrome-bg: Canvas;
+      --sidebar-bg: Canvas;
+      --surface: Canvas;
+      --reading-surface: Canvas;
+      --surface-muted: Canvas;
+      --surface-highlight: Canvas;
+      --text: CanvasText;
+      --muted: CanvasText;
+      --subtle: CanvasText;
+      --disabled: GrayText;
+      --line: ButtonBorder;
+      --line-strong: ButtonBorder;
+      --accent: Highlight;
+      --accent-foreground: HighlightText;
+      --accent-hover: Highlight;
+      --accent-pressed: Highlight;
+      --accent-soft: Canvas;
+      --selected-bg: Highlight;
+      --selection-bg: Highlight;
+      --hover: Canvas;
+      --pressed: Canvas;
+      --error: CanvasText;
+      --error-bg: Canvas;
+      --error-pressed-bg: Canvas;
+      --modal-backdrop: Canvas;
+      --image-backdrop: Canvas;
+      --window-close-hover-bg: Highlight;
+      --window-close-pressed-bg: Highlight;
+      --success: CanvasText;
+      --success-bg: Canvas;
+      --warning: CanvasText;
+      --warning-bg: Canvas;
+      --code-bg: Canvas;
+      --code-comment: GrayText;
+      --code-keyword: LinkText;
+      --code-string: VisitedText;
+      --code-number: LinkText;
+      --code-title: LinkText;
+      --search-hit-bg: Mark;
+      --search-hit-text: MarkText;
+      --search-hit-current-bg: Highlight;
+      --search-hit-current-outline: HighlightText;
+      --shadow-popover: none;
+      --shadow-dialog: none;
+    }
+
+    .app-shell :global(button:focus-visible),
+    .app-shell :global(a:focus-visible),
+    .app-shell .reader-viewport:focus-visible,
+    .reader-content :global(.reader-table-wrap:focus-visible) {
+      outline-color: HighlightText;
+    }
+
+    .app-shell .settings-nav button.active,
+    .app-shell .settings-segmented button.active,
+    .app-shell .window-mode-toggle[aria-pressed="true"],
+    .app-shell .tool-button[aria-pressed="true"],
+    .app-shell .titlebar-action[aria-pressed="true"],
+    .app-shell .menu-trigger[aria-expanded="true"],
+    .app-shell .outline-item.current {
+      color: HighlightText;
+      background: Highlight;
+    }
+
+    .app-shell .window-controls .close-window:hover {
+      color: HighlightText;
+      background: Highlight;
+    }
+
+    .app-shell .window-controls .close-window:hover:focus-visible {
+      outline-color: HighlightText;
+    }
+
+    .app-shell.window-inactive .tab-shell:not(.selected) .tab-name,
+    .app-shell.window-inactive .tab-shell:not(.selected) .tab-button > :global(svg),
+    .app-shell.window-inactive .tab-close :global(svg),
+    .app-shell.window-inactive .titlebar-preferences button :global(svg),
+    .app-shell.window-inactive .window-controls button :global(svg) {
+      opacity: 1;
+    }
+
+    .reader-content :global(a) {
+      color: LinkText;
+      text-decoration: underline;
     }
   }
 
@@ -4996,6 +6362,12 @@
     color: var(--text);
     font-size: 20px;
     font-weight: 600;
+  }
+
+  .error-state .state-icon {
+    border-color: color-mix(in srgb, var(--error) 28%, var(--line));
+    color: var(--error);
+    background: var(--error-bg);
   }
 
   .error-state p {
@@ -5018,61 +6390,76 @@
     margin-top: 8px;
   }
 
-  .error-actions .secondary-button {
-    margin-top: 0;
-  }
-
-  .secondary-button {
-    min-height: 36px;
-    margin-top: 8px;
-    border-color: var(--line-strong);
-    color: var(--text);
-    background: var(--surface);
-  }
-
-  .secondary-button:hover {
-    background: var(--hover);
-  }
-
   .modal-backdrop {
     position: fixed;
     inset: 0;
-    z-index: 40;
+    z-index: 100;
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 24px;
-    background: rgba(13, 20, 31, 0.34);
-    transform-origin: center;
+    background: transparent;
+  }
+
+  .modal-backdrop-shade {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background: var(--modal-backdrop);
   }
 
   .image-zoom-backdrop {
+    --image-preview-safe-inset: 56px;
     position: fixed;
     inset: 0;
-    z-index: 50;
+    z-index: 100;
     display: grid;
     place-items: center;
-    padding: 42px;
-    background: rgba(8, 12, 19, 0.84);
-    transform-origin: center;
+    padding: var(--image-preview-safe-inset);
+    background: transparent;
+  }
+
+  .image-zoom-backdrop-shade {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background: var(--image-backdrop);
   }
 
   .image-zoom-backdrop img {
-    max-width: min(100%, 1440px);
-    max-height: 100%;
+    position: relative;
+    z-index: 1;
+    max-width: min(
+      86vw,
+      1440px,
+      calc(100vw - var(--image-preview-safe-inset) - var(--image-preview-safe-inset))
+    );
+    max-height: min(
+      82vh,
+      calc(100vh - var(--image-preview-safe-inset) - var(--image-preview-safe-inset))
+    );
     object-fit: contain;
     border-radius: 4px;
     box-shadow: 0 20px 70px rgba(0, 0, 0, 0.4);
     transform-origin: center;
   }
 
-  .image-zoom-close {
+  .image-preview-notice {
     position: absolute;
-    top: 14px;
+    z-index: 1;
+  }
+
+  .image-zoom-close {
+    --button-pressed-bg: rgba(255, 255, 255, 0.3);
+    position: absolute;
+    z-index: 2;
+    top: 16px;
     right: 16px;
     display: grid;
-    width: 38px;
-    height: 38px;
+    width: 40px;
+    height: 40px;
     place-items: center;
     border: 0;
     border-radius: var(--radius-control);
@@ -5085,21 +6472,63 @@
     background: rgba(255, 255, 255, 0.22);
   }
 
+  .app-shell .image-zoom-close:focus-visible {
+    outline-color: #fff;
+  }
+
+  @media (forced-colors: active) {
+    .app-shell .image-zoom-close:focus-visible {
+      outline-color: HighlightText;
+    }
+  }
+
+  .app-shell .image-zoom-close :global(svg) {
+    width: 20px;
+    height: 20px;
+  }
+
   .confirm-dialog {
-    width: min(100%, 440px);
+    position: relative;
+    z-index: 1;
+    width: min(100%, 460px);
     padding: 24px;
     border: 1px solid var(--line);
     border-radius: var(--radius-dialog);
     color: var(--text);
     background: var(--surface);
-    box-shadow: var(--shadow);
+    box-shadow: var(--shadow-dialog);
     transform-origin: center;
   }
 
   .confirm-dialog h2 {
     margin: 0;
-    font-size: 19px;
-    font-weight: 650;
+    font-size: 20px;
+    font-weight: 600;
+  }
+
+  .confirm-dialog .confirm-dialog-close {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    display: grid;
+    width: 32px;
+    height: 32px;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-control);
+    color: var(--muted);
+    background: transparent;
+  }
+
+  .confirm-dialog .confirm-dialog-close:hover {
+    color: var(--text);
+    background: var(--hover);
+  }
+
+  .confirm-dialog .confirm-dialog-close :global(svg) {
+    width: 18px;
+    height: 18px;
   }
 
   .confirm-dialog p {
@@ -5107,6 +6536,17 @@
     color: var(--muted);
     font-size: 15px;
     line-height: 1.6;
+    overflow-wrap: anywhere;
+  }
+
+  .confirm-notice {
+    position: static;
+    width: 100%;
+    max-width: none;
+    max-height: min(30vh, 180px);
+    margin-top: 16px;
+    translate: none;
+    box-shadow: none;
   }
 
   .pending-document-list {
@@ -5120,79 +6560,167 @@
 
   .dialog-actions {
     display: flex;
+    align-items: center;
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: 8px;
-    margin-top: 22px;
+    margin-top: 24px;
   }
 
-  .dialog-actions button {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
+  .close-confirm-actions button {
+    min-width: 132px;
     min-height: 38px;
-    margin: 0;
-    padding: 0 13px;
     border: 1px solid var(--line-strong);
-    border-radius: var(--radius-control);
-    color: var(--text);
     background: var(--surface);
-    font: inherit;
-    font-size: 15px;
-    font-weight: 600;
-    cursor: pointer;
   }
 
-  .dialog-actions button:hover:not(:disabled) {
-    background: var(--hover);
+  .close-confirm-actions .danger-button {
+    color: var(--error);
   }
 
-  .dialog-actions .primary-button {
-    border-color: transparent;
+  .close-confirm-actions .danger-button:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--error) 48%, var(--line));
+    background: var(--error-bg);
+  }
+
+  .close-confirm-actions .primary-button {
+    color: var(--accent);
+  }
+
+  .close-confirm-actions .primary-button:hover:not(:disabled) {
+    border-color: var(--accent);
     color: var(--accent-foreground);
     background: var(--accent);
   }
 
-  .dialog-actions .primary-button:hover:not(:disabled) {
-    background: var(--accent-hover);
+  .dialog-actions .danger-button + .secondary-button {
+    margin-left: 12px;
   }
 
   .dialog-actions button:disabled {
-    opacity: 0.6;
     cursor: default;
   }
 
   .notice {
     position: fixed;
-    right: 24px;
-    bottom: 22px;
+    left: 50%;
+    bottom: 24px;
     z-index: 20;
-    max-width: min(420px, calc(100vw - 48px));
-    padding: 11px 15px;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    width: max-content;
+    max-width: min(480px, calc(100vw - 48px));
+    max-height: min(50vh, 240px);
+    padding: 12px 16px;
+    overflow: auto;
     border: 1px solid var(--line);
     border-radius: var(--radius-popover);
     color: var(--text);
     background: var(--surface);
-    box-shadow: var(--shadow);
-    font-size: 15px;
+    box-shadow: var(--shadow-popover);
+    font-size: 14px;
     line-height: 1.5;
-    transform-origin: bottom right;
+    translate: -50% 0;
+    transform-origin: bottom center;
   }
 
-  @media (max-width: 1100px) {
-    .reader-content {
-      padding-right: 36px;
-      padding-left: 36px;
-    }
+  .notice > span {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .notice > button {
+    display: grid;
+    flex: 0 0 32px;
+    width: 32px;
+    height: 32px;
+    place-items: center;
+    margin: -6px -8px -5px 0;
+    border: 0;
+    border-radius: var(--radius-control);
+    color: var(--muted);
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .notice > button:hover {
+    color: var(--text);
+    background: var(--hover);
+  }
+
+  :global(.app-tooltip) {
+    position: fixed;
+    z-index: 40;
+    width: max-content;
+    max-width: min(280px, calc(100vw - 24px));
+    max-height: min(200px, calc(100vh - 24px));
+    padding: 6px 10px;
+    overflow: auto;
+    border: 1px solid var(--tooltip-line, ButtonBorder);
+    border-radius: var(--radius-control, 6px);
+    color: var(--tooltip-text, CanvasText);
+    background: var(--tooltip-surface, Canvas);
+    box-shadow: var(--tooltip-shadow, none);
+    font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+    font-size: 14px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+    pointer-events: none;
+    transform: translate(-50%, 4px);
+    opacity: 0;
+    transition:
+      opacity 120ms var(--ease-out, cubic-bezier(0.333333, 1, 0.666667, 1)),
+      transform 120ms var(--ease-out, cubic-bezier(0.333333, 1, 0.666667, 1));
+  }
+
+  :global(.app-tooltip[data-layer="modal"]) {
+    z-index: 120;
+  }
+
+  :global(.app-tooltip[data-placement="below"]) {
+    transform: translate(-50%, -4px);
+  }
+
+  :global(.app-tooltip[data-visible="true"]) {
+    transform: translate(-50%, 0);
+    opacity: 1;
+  }
+
+  :global(.app-tooltip[data-placement="right"]) {
+    transform: translate(4px, -50%);
+  }
+
+  :global(.app-tooltip[data-placement="left"]) {
+    transform: translate(-4px, -50%);
+  }
+
+  :global(.app-tooltip[data-visible="true"][data-placement="right"]) {
+    transform: translate(0, -50%);
+  }
+
+  :global(.app-tooltip[data-visible="true"][data-placement="left"]) {
+    transform: translate(0, -50%);
+  }
+
+  .app-shell.has-modal .notice {
+    z-index: 120;
   }
 
   @media (max-width: 820px) {
-    .window-controls {
-      flex-basis: 120px;
-    }
-
     .window-controls button {
       width: 40px;
+      flex-basis: 40px;
+    }
+
+    .titlebar-preferences .window-mode-toggle {
+      width: 72px;
+      flex-basis: 72px;
+    }
+
+    .titlebar-preferences .theme-toggle {
+      width: 36px;
+      flex-basis: 36px;
     }
 
     .app-shell {
@@ -5219,19 +6747,47 @@
       padding: 40px 25px 76px;
     }
 
-    .floating-search-box {
-      right: var(--toolbar-inline-padding);
+  }
+
+  @media (max-width: 760px) {
+    .settings-workspace-body { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+    .settings-nav {
+      flex-direction: row;
+      gap: 4px;
+      overflow-x: auto;
+      padding: 10px 12px;
+      border-right: 0;
+      border-bottom: 1px solid var(--line);
     }
+    .settings-nav button { flex: 0 0 auto; }
+    .settings-panel-content { padding: 24px; }
+    .settings-control-row,
+    .settings-switch-row,
+    .settings-file-setting { column-gap: 20px; }
   }
 
   @media (max-width: 560px) {
     .titlebar {
-      --window-controls-width: 102px;
       height: var(--titlebar-height);
     }
 
     .window-controls button {
       width: 34px;
+      flex-basis: 34px;
+    }
+
+    .titlebar-preferences .window-mode-toggle {
+      width: 66px;
+      flex-basis: 66px;
+      gap: 4px;
+      margin-inline: 2px;
+      padding-inline: 3px;
+    }
+
+    .titlebar-preferences .theme-toggle {
+      width: 34px;
+      flex-basis: 34px;
+      margin-inline: 2px;
     }
 
     .tab-shell {
@@ -5239,12 +6795,12 @@
       max-width: 160px;
     }
 
-    .toolbar-left {
-      gap: 1px;
+    .tab-strip {
+      min-width: 0;
     }
 
-    .toolbar-separator {
-      margin: 0 2px;
+    .toolbar-left {
+      gap: 1px;
     }
 
     .menu-trigger {
@@ -5256,32 +6812,41 @@
     }
 
     .tool-button {
-      width: 30px;
+      width: 32px;
     }
 
     .reader-content {
+      width: 100%;
+      margin: 0;
       padding: 32px 19px 64px;
     }
 
-    .home-screen {
-      padding: 34px 18px;
+    .tool-button-label {
+      width: 32px;
+      min-width: 32px;
+      padding: 0;
     }
 
-    .home-content.has-recent {
-      transform: translateY(-30px);
-    }
+    .tool-button-label span { display: none; }
 
-    .home-content:not(.has-recent) {
-      transform: translateY(-14px);
-    }
+    .settings-workspace-header { flex-basis: 56px; padding: 0 20px; }
+    .settings-panel-content { padding: 20px; }
+    .toolbar-left .menu-trigger > :global(svg) { display: none; }
+    .settings-toggle > :global(svg) { display: none; }
+  }
 
-    .home-action-button kbd {
-      display: none;
-    }
-
-    .recent-section {
-      margin-top: 25px;
-    }
+  @media (max-width: 420px) {
+    .settings-workspace-header { padding: 0 16px; }
+    .settings-panel-content { padding: 18px 16px; }
+    .settings-control-row,
+    .settings-switch-row { display: flex; align-items: flex-start; flex-direction: column; gap: 10px; }
+    .settings-switch-row { flex-direction: row; align-items: center; }
+    .settings-page { gap: 0; }
+    .settings-folder-control { grid-column: 1; align-items: flex-start; flex-direction: column; }
+    .settings-file-setting { grid-template-columns: minmax(0, 1fr); }
+    .settings-file-setting > .settings-button { justify-self: stretch; }
+    .settings-button { width: 100%; }
+    .font-size-controls .settings-button { width: auto; }
   }
 
   @media print {
@@ -5331,11 +6896,13 @@
     .outline-panel,
     .outline-splitter,
     .external-banner,
-    .home-screen,
+    .empty-workspace,
     .document-state,
+    .settings-workspace,
     .modal-backdrop,
     .notice,
-    .tab-context-menu {
+    .tab-context-menu,
+    .editor-workspace {
       display: none !important;
     }
 
@@ -5371,26 +6938,10 @@
       box-shadow: none !important;
     }
 
-    .editor-split {
+    .print-document {
       display: block !important;
       height: auto !important;
       overflow: visible !important;
-    }
-
-    .editor-source-pane,
-    .editor-splitter {
-      display: none !important;
-    }
-
-    .editor-preview-pane {
-      display: block !important;
-      height: auto !important;
-      overflow: visible !important;
-      background: #ffffff !important;
-    }
-
-    .editor-preview-pane .reader-viewport {
-      height: auto !important;
     }
 
     .reader-content :global(h1),
@@ -5423,6 +6974,15 @@
       color: inherit !important;
       background: transparent !important;
       outline: none !important;
+    }
+
+    .reader-content :global(.reader-code-block pre) {
+      padding-top: 17px;
+    }
+
+    .reader-content :global(.reader-table-wrap) {
+      max-width: none;
+      overflow: visible;
     }
 
     .reader-content :global(.hljs-comment),
