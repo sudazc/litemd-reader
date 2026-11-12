@@ -6,6 +6,7 @@
   import { confirm, open, save } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import MarkdownEditor from "$lib/MarkdownEditor.svelte";
+  import { confirmDocumentReload } from "$lib/reload-confirmation";
   import { fadeTransition, panelTransition, popupTransition } from "$lib/popup-transition";
   import {
     BookOpen,
@@ -1435,7 +1436,7 @@
     try {
       const status = await invoke<MarkdownFileStatus>("get_markdown_version", { path: tab.path });
       const current = tabs.find((item) => item.id === checkedId);
-      if (!current || !sameVersion(current.version, checkedVersion)) return;
+      if (current !== tab || !sameVersion(current.version, checkedVersion)) return;
       if (!status.version) {
         if (current.externalChange !== "missing") {
           current.externalChange = "missing";
@@ -1455,7 +1456,7 @@
     } catch {
       const current = tabs.find((item) => item.id === checkedId);
       if (
-        current &&
+        current === tab &&
         sameVersion(current.version, checkedVersion) &&
         current.externalChange !== "missing"
       ) {
@@ -1472,11 +1473,14 @@
     if (!tab) return;
     const editorInstanceId = tab.editorInstanceId;
     if (isDirty(tab)) {
-      const confirmed = await confirm("重新载入会放弃这篇文档的未保存修改。是否继续？", {
+      const decision = await confirmDocumentReload(() => sourceForTab(tab), () => confirm("重新载入会放弃这篇文档的未保存修改。是否继续？", {
         title: "放弃未保存的修改？",
         kind: "warning",
-      });
-      if (!confirmed) return;
+      }));
+      if (decision === "changed") {
+        showNotice("确认期间文档又有修改，重新载入已取消。");
+      }
+      if (decision !== "confirmed") return;
     }
     const confirmedSource = sourceForTab(tab);
     const confirmedEditorDoc = tab.editorState?.doc ?? null;
