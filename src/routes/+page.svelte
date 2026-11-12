@@ -3222,7 +3222,7 @@
     --surface-highlight: rgba(255, 255, 255, 0.7);
     --text: #1f2d3d;
     --muted: #5f7185;
-    --subtle: #8291a2;
+    --subtle: #64758a;
     --line: #dce4ed;
     --line-strong: #cbd6e2;
     --accent: #326bd1;
@@ -3262,7 +3262,7 @@
     --surface-highlight: rgba(255, 255, 255, 0.04);
     --text: #e7edf5;
     --muted: #afbdce;
-    --subtle: #8496aa;
+    --subtle: #9aabc0;
     --line: #2c3a4b;
     --line-strong: #3c4d61;
     --accent: #8ab4ff;
@@ -4347,7 +4347,7 @@
     color: var(--subtle);
     background: var(--surface-muted);
     font-family: inherit;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 500;
     line-height: 1;
   }
@@ -4381,6 +4381,11 @@
   .recent-section {
     width: 100%;
     margin-top: 27px;
+    padding: 20px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: var(--reading-surface);
+    box-shadow: 0 4px 20px rgba(31, 49, 73, 0.04);
     text-align: left;
   }
 
@@ -4510,6 +4515,7 @@
   }
 
   .recent-list li:hover .remove-recent,
+  .recent-list li:focus-within .remove-recent,
   .remove-recent:focus-visible {
     opacity: 1;
   }

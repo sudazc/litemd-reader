@@ -1,6 +1,7 @@
 import MarkdownIt, { type Token } from "markdown-it";
 import taskLists from "markdown-it-task-lists";
 import DOMPurify from "dompurify";
+import { cacheImageLoader } from "./image-loader";
 
 export type DocumentHeading = {
   id: string;
@@ -305,6 +306,7 @@ export async function renderMarkdown(
     .filter((child) => child.type === "image");
   let nextImageIndex = 0;
   const workerCount = Math.min(3, imageTokens.length);
+  const loadCachedImage = cacheImageLoader(loadImage);
 
   await Promise.all(
     Array.from({ length: workerCount }, async () => {
@@ -319,7 +321,7 @@ export async function renderMarkdown(
 
         try {
           const localPath = decodeURIComponent(sourcePath.split(/[?#]/, 1)[0]);
-          child.attrSet("src", await loadImage(localPath));
+          child.attrSet("src", await loadCachedImage(localPath));
         } catch {
           replaceWithText(child, `[图片无法加载：${alt}]`);
         }
