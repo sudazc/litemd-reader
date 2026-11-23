@@ -269,7 +269,9 @@ export async function loadKatexExportCss(): Promise<string> {
 export function buildStaticHtml(options: StaticHtmlOptions): string {
   const title = escapeHtml(options.title);
   const theme = options.darkMode ? "dark" : "light";
-  const size = Math.min(25, Math.max(15, Math.round(options.fontSize)));
+  const size = Number.isFinite(options.fontSize)
+    ? Math.min(25, Math.max(15, Math.round(options.fontSize)))
+    : 20;
   const lineHeight = [1.6, 1.8, 2].includes(options.lineHeight) ? options.lineHeight : 1.8;
   const styles = readerStyles
     .replace("font-size: 20px;", `font-size: ${size}px;`)
