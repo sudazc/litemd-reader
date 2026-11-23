@@ -332,7 +332,8 @@
     editorView.focus();
     await updateContextMenuPosition();
     if (!editorContextMenuPosition || !contextMenuElement) return;
-    contextMenuElement?.focus();
+    const firstItem = contextMenuElement.querySelector<HTMLButtonElement>('button[role="menuitem"]:enabled');
+    (firstItem ?? contextMenuElement).focus({ preventScroll: true });
   }
 
   function handleOutsidePointerDown(event: PointerEvent) {
@@ -1431,7 +1432,7 @@
     flex: 0 0 auto;
     width: 100%;
     min-height: 32px;
-    gap: 9px;
+    gap: 8px;
     padding: 0 9px;
     border: 0;
     border-radius: var(--radius-control);
@@ -1445,9 +1446,11 @@
 
   .editor-context-menu button span {
     flex: 1;
+    min-width: 0;
   }
 
   .editor-context-menu button :global(svg) {
+    flex-shrink: 0;
     color: var(--muted);
   }
 
@@ -1478,9 +1481,11 @@
   }
 
   .editor-context-menu kbd {
+    margin-inline-start: auto;
     color: var(--subtle);
     font: inherit;
     font-size: 14px;
+    white-space: nowrap;
   }
 
   .editor-context-menu button:disabled kbd {

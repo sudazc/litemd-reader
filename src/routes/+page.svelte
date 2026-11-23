@@ -205,6 +205,7 @@
   let headingScrollPending = false;
   let notice = $state("");
   let tabContextMenu = $state<{ tabId: string; x: number; y: number } | null>(null);
+  let tabContextMenuElement = $state<HTMLDivElement>();
   let zoomedImage = $state<{ src: string; alt: string } | null>(null);
   let pendingCloseIds = $state<string[]>([]);
   let closeAfterConfirmation = $state(false);
@@ -212,6 +213,8 @@
   let pendingConfirmation = $state<ConfirmationRequest | null>(null);
   let confirmationResolver: ((confirmed: boolean) => void) | undefined;
   let confirmationReturnFocus: HTMLElement | null = null;
+  let closePromptReturnFocus: HTMLElement | null = null;
+  let confirmationDialog = $state<HTMLElement>();
   let allowConfirmedWindowClose = false;
   let closePromptGeneration = 0;
   let startupOpenReady = $state(false);
@@ -544,23 +547,7 @@
     noticeFocusInside = false;
     notice = "";
     noticePersistent = false;
-    if (!restoreFocus) return;
-
-    void tick().then(() => {
-      if (settingsOpen) {
-        focusSettingsCategory();
-      } else if (pendingConfirmation) {
-        document.querySelector<HTMLButtonElement>(".action-confirm-dialog [data-cancel-confirm]")?.focus();
-      } else if (pendingCloseIds.length) {
-        document.querySelector<HTMLButtonElement>(".confirm-dialog [data-cancel-close]")?.focus();
-      } else if (zoomedImage) {
-        imageZoomClose?.focus();
-      } else if (activeTab) {
-        tabStripElement?.querySelector<HTMLElement>(".tab-shell.selected .tab-button")?.focus();
-      } else {
-        focusToolbarEntry();
-      }
-    });
+    if (restoreFocus) restoreWorkspaceFocus();
   }
 
   function focusToolbarEntry() {
@@ -568,6 +555,32 @@
       document.querySelector<HTMLButtonElement>('[data-menu-trigger="file"]') ??
       document.querySelector<HTMLButtonElement>(".settings-toggle");
     entry?.focus();
+  }
+
+  function focusConfirmation(): boolean {
+    if ((!pendingConfirmation && !pendingCloseIds.length) || !confirmationDialog) return false;
+    const selector = pendingConfirmation ? "[data-cancel-confirm]:enabled" : "[data-cancel-close]:enabled";
+    const target = confirmationDialog.querySelector<HTMLButtonElement>(selector) ?? confirmationDialog;
+    target.focus({ preventScroll: true });
+    return true;
+  }
+
+  /** 弹层关闭后把键盘焦点交还给可用的入口 */
+  function restoreWorkspaceFocus(trigger: HTMLElement | null = null) {
+    void tick().then(() => {
+      if (focusConfirmation()) return;
+      if (zoomedImage) {
+        imageZoomClose?.focus({ preventScroll: true });
+      } else if (trigger?.isConnected && trigger !== document.body && !trigger.matches(":disabled") && !trigger.closest("[inert]")) {
+        trigger.focus({ preventScroll: true });
+      } else if (settingsOpen) {
+        focusSettingsCategory();
+      } else if (activeTab) {
+        tabStripElement?.querySelector<HTMLElement>(".tab-shell.selected .tab-button")?.focus({ preventScroll: true });
+      } else {
+        focusToolbarEntry();
+      }
+    });
   }
 
   function displayError(error: unknown, fallback: string) {
@@ -1082,6 +1095,10 @@
           resolveActionConfirmation(false);
           return;
         }
+        if (pendingCloseIds.length || closeSaveInProgress) {
+          event.preventDefault();
+          return;
+        }
         persistSession();
         persistDraftRecovery();
         const dirtyIds = tabs.filter((tab) => isDirty(tab)).map((tab) => tab.id);
@@ -1121,7 +1138,7 @@
     };
 
     const handleKeydown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
+      if (event.defaultPrevented || event.isComposing) return;
       const modifier = event.ctrlKey || event.metaKey;
       const key = event.key.toLocaleLowerCase();
 
@@ -1132,9 +1149,11 @@
           event.preventDefault();
           resolveActionConfirmation(false);
         } else if (pendingCloseIds.length) {
+          event.preventDefault();
           cancelPendingClose();
         } else if (tabContextMenu) {
-          tabContextMenu = null;
+          event.preventDefault();
+          closeTabContextMenu();
         } else if (searchOpen) {
           closeSearch();
         } else if (settingsOpen) {
@@ -1147,7 +1166,6 @@
 
       if (modifier && key === "a") {
         if (
-          event.isComposing ||
           isTextEntryTarget(event.target) ||
           settingsOpen ||
           documentInteractionBlocked ||
@@ -1582,11 +1600,7 @@
     const result = new Promise<boolean>((resolve) => {
       confirmationResolver = resolve;
     });
-    void tick().then(() => {
-      if (pendingConfirmation) {
-        document.querySelector<HTMLButtonElement>(".action-confirm-dialog [data-cancel-confirm]")?.focus();
-      }
-    });
+    void tick().then(focusConfirmation);
     return result;
   }
 
@@ -1598,39 +1612,26 @@
     const returnFocus = confirmationReturnFocus;
     confirmationReturnFocus = null;
     resolve(confirmed);
-    void tick().then(() => {
-      if (pendingConfirmation) {
-        document.querySelector<HTMLButtonElement>(".action-confirm-dialog [data-cancel-confirm]")?.focus();
-      } else if (returnFocus?.isConnected && !returnFocus.matches(":disabled")) {
-        returnFocus.focus({ preventScroll: true });
-      } else if (settingsOpen) {
-        focusSettingsCategory();
-      } else if (pendingCloseIds.length) {
-        document.querySelector<HTMLButtonElement>(".confirm-dialog [data-cancel-close]")?.focus();
-      } else if (zoomedImage) {
-        imageZoomClose?.focus();
-      } else if (activeTab) {
-        tabStripElement?.querySelector<HTMLElement>(".tab-shell.selected .tab-button")?.focus();
-      } else {
-        focusToolbarEntry();
-      }
-    });
+    restoreWorkspaceFocus(returnFocus);
   }
 
   function showClosePrompt(ids: string[], closeWindowAfter: boolean) {
     closePromptGeneration += 1;
+    closePromptReturnFocus =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
     pendingCloseIds = ids;
     closeAfterConfirmation = closeWindowAfter;
-    void tick().then(() => {
-      document.querySelector<HTMLButtonElement>(".confirm-dialog [data-cancel-close]")?.focus();
-    });
+    void tick().then(focusConfirmation);
   }
 
   function handleConfirmDialogKeydown(event: KeyboardEvent) {
     if (event.key !== "Tab") return;
     const dialog = event.currentTarget as HTMLElement;
     const buttons = Array.from(dialog.querySelectorAll<HTMLButtonElement>("button:not([disabled])"));
-    if (!buttons.length) return;
+    if (!buttons.length) {
+      event.preventDefault();
+      return;
+    }
     const first = buttons[0];
     const last = buttons.at(-1)!;
     if (document.activeElement === dialog) {
@@ -1652,9 +1653,10 @@
     const promptGeneration = closePromptGeneration;
     let closing = [...pendingCloseIds];
     const shouldCloseWindow = closeAfterConfirmation;
-    if (action === "discard") {
-      closeSaveInProgress = true;
-      try {
+    closeSaveInProgress = true;
+    void tick().then(focusConfirmation);
+    try {
+      if (action === "discard") {
         while (true) {
           const pendingSaves = closing
             .map((id) => tabs.find((tab) => tab.id === id))
@@ -1666,13 +1668,7 @@
           if (closePromptGeneration !== promptGeneration) return;
           closing = [...pendingCloseIds];
         }
-      } finally {
-        closeSaveInProgress = false;
-      }
-    }
-    if (action === "save") {
-      closeSaveInProgress = true;
-      try {
+      } else {
         for (const id of [...closing]) {
           if (closePromptGeneration !== promptGeneration) return;
           const tab = tabs.find((item) => item.id === id);
@@ -1693,11 +1689,14 @@
           showNotice("保存期间文档又有修改，请再次保存后关闭。", true);
           return;
         }
-      } finally {
-        closeSaveInProgress = false;
       }
+    } finally {
+      closeSaveInProgress = false;
+      void tick().then(focusConfirmation);
     }
     if (closePromptGeneration !== promptGeneration) return;
+    const returnFocus = closePromptReturnFocus;
+    closePromptReturnFocus = null;
     pendingCloseIds = [];
     closePromptGeneration += 1;
     if (shouldCloseWindow) {
@@ -1712,17 +1711,23 @@
         allowConfirmedWindowClose = false;
         closeAfterConfirmation = false;
         showNotice("关闭窗口失败：" + displayError(error, "请再试一次。"));
+        restoreWorkspaceFocus(returnFocus);
       }
       return;
     }
     closeAfterConfirmation = false;
     performCloseTabs(closing);
+    restoreWorkspaceFocus(returnFocus);
   }
 
   function cancelPendingClose() {
+    if (closeSaveInProgress) return;
+    const returnFocus = closePromptReturnFocus;
+    closePromptReturnFocus = null;
     closePromptGeneration += 1;
     pendingCloseIds = [];
     closeAfterConfirmation = false;
+    restoreWorkspaceFocus(returnFocus);
   }
 
   function performCloseTabs(ids: string[]) {
@@ -1816,14 +1821,21 @@
 
   function openTabContextMenu(tabId: string, x: number, y: number) {
     openMenu = null;
-    tabContextMenu = {
-      tabId,
-      x: Math.max(4, Math.min(x, window.innerWidth - 194)),
-      y: Math.max(4, Math.min(y, window.innerHeight - 154)),
-    };
+    tabContextMenu = { tabId, x, y };
+    const openedMenu = tabContextMenu;
     void tick().then(() => {
-        document.querySelector<HTMLElement>(".tab-context-menu [role^='menuitem']")?.focus();
+      if (tabContextMenu !== openedMenu || !tabContextMenuElement) return;
+      const menu = tabContextMenuElement;
+      openedMenu.x = Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8));
+      openedMenu.y = Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8));
+      menu.querySelector<HTMLButtonElement>('button[role="menuitem"]:enabled')?.focus({ preventScroll: true });
     });
+  }
+
+  function closeTabContextMenu() {
+    const tabId = tabContextMenu?.tabId;
+    tabContextMenu = null;
+    focusTabButton(tabId);
   }
 
   function focusTabButton(tabId: string | null | undefined) {
@@ -2936,24 +2948,27 @@
     if (settingsOpen) return;
   }
 
-  function handleSettingsTabKeydown(event: KeyboardEvent) {
+  function handleSettingsChoiceKeydown(event: KeyboardEvent) {
     const direction = event.key === "ArrowDown" || event.key === "ArrowRight"
       ? 1
       : event.key === "ArrowUp" || event.key === "ArrowLeft"
         ? -1
         : 0;
     if (direction === 0 && event.key !== "Home" && event.key !== "End") return;
-    const tabs = Array.from(settingsWorkspace?.querySelectorAll<HTMLButtonElement>('[role="tab"]') ?? []);
-    if (!tabs.length) return;
+    const button = event.currentTarget as HTMLButtonElement;
+    const group = button.parentElement;
+    if (!group) return;
+    const buttons = Array.from(group.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
+    if (!buttons.length) return;
     event.preventDefault();
-    const currentIndex = Math.max(0, tabs.indexOf(event.currentTarget as HTMLButtonElement));
+    const currentIndex = Math.max(0, buttons.indexOf(button));
     const nextIndex = event.key === "Home"
       ? 0
       : event.key === "End"
-        ? tabs.length - 1
-        : (currentIndex + direction + tabs.length) % tabs.length;
-    tabs[nextIndex].focus();
-    tabs[nextIndex].click();
+        ? buttons.length - 1
+        : (currentIndex + direction + buttons.length) % buttons.length;
+    buttons[nextIndex].focus();
+    buttons[nextIndex].click();
   }
 
   function toggleMenu(menu: "file" | "recent" | "tabs") {
@@ -2969,9 +2984,12 @@
     focusedRecentPath = null;
     openMenu = menu;
     void tick().then(() => {
+      if (openMenu !== menu) return;
       document
-        .querySelector<HTMLElement>(
-          ".dropdown-menu [role^='menuitem']:not([disabled]):not([aria-hidden='true'])",
+        .querySelector<HTMLButtonElement>(`[data-menu-trigger="${menu}"]`)
+        ?.closest(".menu-wrap")
+        ?.querySelector<HTMLElement>(
+          "[role^='menuitem']:not([disabled]):not([aria-hidden='true'])",
         )
         ?.focus();
     });
@@ -2979,20 +2997,11 @@
 
   function handleMenuKeydown(event: KeyboardEvent) {
     const menu = event.currentTarget as HTMLElement;
-    const items = Array.from(
-      menu.querySelectorAll<HTMLElement>(
-        "[role='menuitem']:not([disabled]):not([aria-hidden='true']),[role='menuitemcheckbox']:not([disabled]):not([aria-hidden='true']),[role='menuitemradio']:not([disabled]):not([aria-hidden='true'])",
-      ),
-    );
-    if (!items.length) return;
-
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
       if (menu.classList.contains("tab-context-menu")) {
-        const tabId = tabContextMenu?.tabId;
-        tabContextMenu = null;
-        focusTabButton(tabId);
+        closeTabContextMenu();
       } else {
         const trigger = menu.parentElement?.querySelector<HTMLButtonElement>(".menu-trigger");
         openMenu = null;
@@ -3000,6 +3009,11 @@
       }
       return;
     }
+
+    const items = Array.from(
+      menu.querySelectorAll<HTMLElement>("[role^='menuitem']:not([disabled]):not([aria-hidden='true'])"),
+    );
+    if (!items.length) return;
 
     const currentIndex = items.indexOf(document.activeElement as HTMLElement);
     let nextIndex: number | null = null;
@@ -3198,7 +3212,7 @@
   onpointermove={handleWindowResizePointerMove}
   onpointerleave={clearWindowResizeDirection}
 >
-  <header class="titlebar">
+  <header class="titlebar" inert={documentInteractionBlocked}>
   <nav class="toolbar" aria-label="应用工具栏">
     <div class="toolbar-left">
       <div class="menu-wrap">
@@ -3434,6 +3448,7 @@
         id="settings-panel"
         bind:this={settingsWorkspace}
         aria-labelledby="settings-title"
+        inert={documentInteractionBlocked}
         in:shiftTransition={{ duration: 170, y: -8, scale: 1 }}
         out:shiftTransition={{ duration: 100, y: -8, scale: 1 }}
       >
@@ -3452,10 +3467,10 @@
 
         <div class="settings-workspace-body">
           <div class="settings-nav" role="tablist" aria-label="设置类别" aria-orientation="vertical">
-            <button id="settings-tab-appearance" type="button" role="tab" aria-selected={settingsCategory === "appearance"} tabindex={settingsCategory === "appearance" ? 0 : -1} class:active={settingsCategory === "appearance"} onclick={() => (settingsCategory = "appearance")} onkeydown={handleSettingsTabKeydown}>阅读外观</button>
-            <button id="settings-tab-behavior" type="button" role="tab" aria-selected={settingsCategory === "behavior"} tabindex={settingsCategory === "behavior" ? 0 : -1} class:active={settingsCategory === "behavior"} onclick={() => (settingsCategory = "behavior")} onkeydown={handleSettingsTabKeydown}>阅读行为</button>
-            <button id="settings-tab-files" type="button" role="tab" aria-selected={settingsCategory === "files"} tabindex={settingsCategory === "files" ? 0 : -1} class:active={settingsCategory === "files"} onclick={() => (settingsCategory = "files")} onkeydown={handleSettingsTabKeydown}>文件</button>
-            <button id="settings-tab-about" type="button" role="tab" aria-selected={settingsCategory === "about"} tabindex={settingsCategory === "about" ? 0 : -1} class:active={settingsCategory === "about"} onclick={() => (settingsCategory = "about")} onkeydown={handleSettingsTabKeydown}>关于</button>
+            <button id="settings-tab-appearance" type="button" role="tab" aria-selected={settingsCategory === "appearance"} tabindex={settingsCategory === "appearance" ? 0 : -1} class:active={settingsCategory === "appearance"} onclick={() => (settingsCategory = "appearance")} onkeydown={handleSettingsChoiceKeydown}>阅读外观</button>
+            <button id="settings-tab-behavior" type="button" role="tab" aria-selected={settingsCategory === "behavior"} tabindex={settingsCategory === "behavior" ? 0 : -1} class:active={settingsCategory === "behavior"} onclick={() => (settingsCategory = "behavior")} onkeydown={handleSettingsChoiceKeydown}>阅读行为</button>
+            <button id="settings-tab-files" type="button" role="tab" aria-selected={settingsCategory === "files"} tabindex={settingsCategory === "files" ? 0 : -1} class:active={settingsCategory === "files"} onclick={() => (settingsCategory = "files")} onkeydown={handleSettingsChoiceKeydown}>文件</button>
+            <button id="settings-tab-about" type="button" role="tab" aria-selected={settingsCategory === "about"} tabindex={settingsCategory === "about" ? 0 : -1} class:active={settingsCategory === "about"} onclick={() => (settingsCategory = "about")} onkeydown={handleSettingsChoiceKeydown}>关于</button>
           </div>
 
           <div class="settings-panel-content" role="tabpanel" id={"settings-panel-" + settingsCategory} aria-labelledby={"settings-tab-" + settingsCategory}>
@@ -3465,8 +3480,8 @@
                 <div class="settings-control-row">
                   <div class="settings-label"><span>主题</span><small>选择阅读界面的颜色</small></div>
                   <div class="settings-segmented" role="radiogroup" aria-label="主题">
-                    <button type="button" role="radio" aria-checked={!darkMode} class:active={!darkMode} onclick={() => setTheme("light")}>浅色</button>
-                    <button type="button" role="radio" aria-checked={darkMode} class:active={darkMode} onclick={() => setTheme("dark")}>深色</button>
+                    <button type="button" role="radio" aria-checked={!darkMode} tabindex={darkMode ? -1 : 0} class:active={!darkMode} onclick={() => setTheme("light")} onkeydown={handleSettingsChoiceKeydown}>浅色</button>
+                    <button type="button" role="radio" aria-checked={darkMode} tabindex={darkMode ? 0 : -1} class:active={darkMode} onclick={() => setTheme("dark")} onkeydown={handleSettingsChoiceKeydown}>深色</button>
                   </div>
                 </div>
                 <div class="settings-control-row">
@@ -3483,9 +3498,9 @@
                 <div class="settings-control-row">
                   <div class="settings-label"><span>行距</span><small>即时应用到阅读和 HTML 导出</small></div>
                   <div class="settings-segmented" role="radiogroup" aria-label="行距">
-                    <button type="button" role="radio" aria-checked={lineHeight === 1.6} class:active={lineHeight === 1.6} onclick={() => setReadingLineHeight("1.6")}>紧凑</button>
-                    <button type="button" role="radio" aria-checked={lineHeight === 1.8} class:active={lineHeight === 1.8} onclick={() => setReadingLineHeight("1.8")}>标准</button>
-                    <button type="button" role="radio" aria-checked={lineHeight === 2} class:active={lineHeight === 2} onclick={() => setReadingLineHeight("2")}>宽松</button>
+                    <button type="button" role="radio" aria-checked={lineHeight === 1.6} tabindex={lineHeight === 1.6 ? 0 : -1} class:active={lineHeight === 1.6} onclick={() => setReadingLineHeight("1.6")} onkeydown={handleSettingsChoiceKeydown}>紧凑</button>
+                    <button type="button" role="radio" aria-checked={lineHeight === 1.8} tabindex={lineHeight === 1.8 ? 0 : -1} class:active={lineHeight === 1.8} onclick={() => setReadingLineHeight("1.8")} onkeydown={handleSettingsChoiceKeydown}>标准</button>
+                    <button type="button" role="radio" aria-checked={lineHeight === 2} tabindex={lineHeight === 2 ? 0 : -1} class:active={lineHeight === 2} onclick={() => setReadingLineHeight("2")} onkeydown={handleSettingsChoiceKeydown}>宽松</button>
                   </div>
                 </div>
                 <div class="settings-preview-wrap">
@@ -3535,7 +3550,7 @@
                   <div class="settings-label"><span>缩进宽度</span><small>按 Tab 输入的空格数</small></div>
                   <div class="settings-segmented" role="radiogroup" aria-label="缩进宽度">
                     {#each editorIndentWidths as width}
-                      <button type="button" role="radio" aria-checked={editorIndentWidth === width} class:active={editorIndentWidth === width} onclick={() => setEditorIndentWidth(width)}>{width} 空格</button>
+                      <button type="button" role="radio" aria-checked={editorIndentWidth === width} tabindex={editorIndentWidth === width ? 0 : -1} class:active={editorIndentWidth === width} onclick={() => setEditorIndentWidth(width)} onkeydown={handleSettingsChoiceKeydown}>{width} 空格</button>
                     {/each}
                   </div>
                 </div>
@@ -3543,14 +3558,14 @@
             {:else if settingsCategory === "files"}
               <section class="settings-page">
                 <h3>文件</h3>
-                <div class="settings-file-setting">
+                <div class="settings-control-row settings-file-setting">
                   <div class="settings-label"><span>默认打开目录</span><small>用作打开文件对话框的初始位置</small></div>
                   <div class="settings-folder-control">
-                    <span class="settings-path" title={defaultOpenDirectory || "使用系统默认位置"}>{defaultOpenDirectory || "使用系统默认位置"}</span>
+                    <span class="settings-path" dir={defaultOpenDirectory ? "rtl" : "ltr"} title={defaultOpenDirectory || undefined}><bdi dir="ltr">{defaultOpenDirectory || "使用系统默认位置"}</bdi></span>
                     <button class="settings-button" onclick={() => void chooseDefaultOpenDirectory()}>选择文件夹…</button>
                   </div>
                 </div>
-                <div class="settings-file-setting">
+                <div class="settings-control-row settings-file-setting">
                   <div class="settings-label"><span>Markdown 文件</span><small>为 .md 和 .markdown 设置默认应用</small></div>
                   <button class="settings-button" onclick={() => void openDefaultAppsSettings()}>打开默认应用设置</button>
                 </div>
@@ -3586,18 +3601,20 @@
 
   {#if tabContextMenu}
     <div
-      class="tab-context-menu"
+      class="dropdown-menu tab-context-menu"
+      bind:this={tabContextMenuElement}
       role="menu"
       tabindex="-1"
+      inert={documentInteractionBlocked}
       style={`left:${tabContextMenu.x}px;top:${tabContextMenu.y}px`}
       transition:popupTransition={{ duration: 150 }}
       onkeydown={handleMenuKeydown}
     >
-      <button role="menuitem" onclick={() => { const id = tabContextMenu?.tabId; tabContextMenu = null; if (id) closeTab(id); }}>关闭标签</button>
-      <button role="menuitem" onclick={() => { const id = tabContextMenu?.tabId; tabContextMenu = null; if (id) requestCloseTabs(tabs.filter((tab) => tab.id !== id).map((tab) => tab.id)); }}>关闭其他标签</button>
+      <button role="menuitem" onclick={() => { const id = tabContextMenu?.tabId; tabContextMenu = null; if (id) closeTab(id); }}><X size={16} /><span>关闭标签</span></button>
+      <button role="menuitem" onclick={() => { const id = tabContextMenu?.tabId; tabContextMenu = null; if (id) requestCloseTabs(tabs.filter((tab) => tab.id !== id).map((tab) => tab.id)); }}><X size={16} /><span>关闭其他标签</span></button>
       {#if tabs.find((tab) => tab.id === tabContextMenu?.tabId)?.path}
         <div class="menu-divider"></div>
-        <button role="menuitem" onclick={() => { const id = tabContextMenu?.tabId; if (id) void copyTabPath(id); }}>复制文件路径</button>
+        <button role="menuitem" onclick={() => { const id = tabContextMenu?.tabId; if (id) void copyTabPath(id); }}><Copy size={16} /><span>复制文件路径</span></button>
       {/if}
     </div>
   {/if}
@@ -3611,10 +3628,11 @@
     class:external-changed={!!activeTab?.externalChange && !activeTab.loading && !activeTab.error}
     class:dragging-files={draggingFiles}
     aria-hidden={settingsOpen}
-    inert={settingsOpen}
+    inert={settingsOpen || documentInteractionBlocked}
     style={"--outline-width:" + visibleOutlineWidth + "px"}
   >
     {#if activeTab?.externalChange && !activeTab.loading && !activeTab.error}
+      {@const canSaveCopy = isDirty(activeTab) || activeTab.externalChange === "missing"}
       <div class="external-banner" role="status" aria-live="polite">
         <span>
           {#if activeTab.externalChange === "missing"}
@@ -3624,9 +3642,9 @@
           {/if}
         </span>
         <div>
-          <button class="secondary-button" onclick={() => void reloadCurrentFile()}>重新载入</button>
-          {#if isDirty(activeTab) || activeTab.externalChange === "missing"}
-            <button class="secondary-button" onclick={() => void saveActiveTab(true)}>另存为…</button>
+          <button class={canSaveCopy ? "secondary-button" : "primary-button"} onclick={() => void reloadCurrentFile()}>重新载入</button>
+          {#if canSaveCopy}
+            <button class="primary-button" onclick={() => void saveActiveTab(true)}>另存为…</button>
           {/if}
         </div>
       </div>
@@ -3676,8 +3694,8 @@
     {#if !activeTab}
       <section class="empty-workspace" aria-label="空白工作区"></section>
     {:else if activeTab.loading}
-      <section class="document-state">
-        <div class="loading-ring" role="status" aria-label="正在加载文档"></div>
+      <section class="document-state" role="status">
+        <div class="loading-ring" aria-hidden="true"></div>
         <p>正在打开 {activeTab.name}</p>
       </section>
     {:else if activeTab.error}
@@ -3751,56 +3769,49 @@
       <div
         class="confirm-dialog"
         class:action-confirm-dialog={pendingConfirmation !== null}
+        bind:this={confirmationDialog}
         role="alertdialog"
         tabindex="-1"
         aria-modal="true"
         aria-labelledby={pendingConfirmation ? "action-confirm-title" : "close-confirm-title"}
-        aria-describedby={
-          pendingConfirmation
-            ? "action-confirm-description"
-            : pendingCloseIds.length > 1
-              ? "close-confirm-documents"
-              : undefined
-        }
+        aria-describedby={pendingConfirmation ? "action-confirm-description" : "close-confirm-description"}
         in:shiftTransition={{ duration: 160 }}
         out:shiftTransition={{ duration: 100 }}
         onkeydown={handleConfirmDialogKeydown}
       >
-        {#if pendingConfirmation}
-          <h2 id="action-confirm-title">{pendingConfirmation.title}</h2>
-          <p id="action-confirm-description">{pendingConfirmation.message}</p>
-        {:else}
-          <h2 id="close-confirm-title">有未保存的修改</h2>
-          <button
-            class="confirm-dialog-close"
-            data-cancel-close
-            aria-label="取消"
-            title="取消"
-            onclick={cancelPendingClose}
-          ><X size={18} /></button>
-          {#if pendingCloseIds.length > 1}
-            <ul id="close-confirm-documents" class="pending-document-list">
-              {#each pendingCloseIds as id (id)}
-                {@const pendingTab = tabs.find((tab) => tab.id === id)}
-                {#if pendingTab && isDirty(pendingTab)}<li>{pendingTab.name}</li>{/if}
-              {/each}
-            </ul>
+        <div class="confirm-content">
+          {#if pendingConfirmation}
+            <h2 id="action-confirm-title">{pendingConfirmation.title}</h2>
+            <p id="action-confirm-description">{pendingConfirmation.message}</p>
+          {:else}
+            {@const unsavedTabs = tabs.filter((tab) => pendingCloseIds.includes(tab.id) && isDirty(tab))}
+            <h2 id="close-confirm-title">
+              {unsavedTabs.length === 1 ? "保存对“" + unsavedTabs[0].name + "”的修改？" : "保存这些文档的修改？"}
+            </h2>
+            <p id="close-confirm-description">选择“不保存”会丢弃尚未保存的修改。</p>
+            {#if unsavedTabs.length > 1}
+              <ul class="pending-document-list">
+                {#each unsavedTabs as tab (tab.id)}
+                  <li>{tab.name}</li>
+                {/each}
+              </ul>
+            {/if}
           {/if}
-        {/if}
-        {#if notice}
-          <div
-            class="notice confirm-notice"
-            class:persistent={noticePersistent}
-            role={noticePersistent ? "alert" : "status"}
-            aria-live={noticePersistent ? "assertive" : "polite"}
-            onpointerenter={handleNoticePointerEnter}
-            onpointerleave={handleNoticePointerLeave}
-            onfocusin={handleNoticeFocusIn}
-            onfocusout={handleNoticeFocusOut}
-          >
-            {@render noticeContents()}
-          </div>
-        {/if}
+          {#if notice}
+            <div
+              class="notice confirm-notice"
+              class:persistent={noticePersistent}
+              role={noticePersistent ? "alert" : "status"}
+              aria-live={noticePersistent ? "assertive" : "polite"}
+              onpointerenter={handleNoticePointerEnter}
+              onpointerleave={handleNoticePointerLeave}
+              onfocusin={handleNoticeFocusIn}
+              onfocusout={handleNoticeFocusOut}
+            >
+              {@render noticeContents()}
+            </div>
+          {/if}
+        </div>
         <div class="dialog-actions" class:close-confirm-actions={!pendingConfirmation}>
           {#if pendingConfirmation}
             {#if pendingConfirmation.tone === "danger"}
@@ -3812,6 +3823,7 @@
             {/if}
           {:else}
             <button class="danger-button" disabled={closeSaveInProgress} onclick={() => void resolvePendingClose("discard")}>不保存</button>
+            <button class="secondary-button" data-cancel-close disabled={closeSaveInProgress} onclick={cancelPendingClose}>取消</button>
             <button class="primary-button save-close-button" data-save-close aria-busy={closeSaveInProgress} disabled={closeSaveInProgress} onclick={() => void resolvePendingClose("save")}>
               {#if closeSaveInProgress}
                 <span class="button-spinner" aria-hidden="true"></span>
@@ -4481,13 +4493,7 @@
   }
 
   .settings-file-setting {
-    display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    align-items: center;
-    gap: 12px 24px;
-    min-height: 72px;
-    padding: 14px 0;
-    border-bottom: 1px solid var(--line);
   }
 
   .settings-file-setting > .settings-label {
@@ -4515,7 +4521,10 @@
     overflow: hidden;
     color: var(--muted);
     font-size: 14px;
+    line-height: 1.5;
+    text-align: left;
     text-overflow: ellipsis;
+    unicode-bidi: isolate;
     white-space: nowrap;
   }
 
@@ -5298,7 +5307,7 @@
   }
 
   .dropdown-menu .tab-overflow-item[aria-current="page"] {
-    background: var(--selected);
+    background: var(--selected-bg);
   }
 
   .dropdown-menu .tab-overflow-item[aria-current="page"] > :global(svg) {
@@ -5307,39 +5316,11 @@
 
   .tab-context-menu {
     position: fixed;
-    z-index: 30;
-    display: flex;
-    flex-direction: column;
-    width: 224px;
-    padding: 6px;
-    border: 1px solid var(--line);
-    border-radius: var(--radius-popover);
-    color: var(--text);
-    background: var(--surface);
-    box-shadow: var(--shadow-popover);
-    transform-origin: top left;
+    width: min(224px, calc(100vw - 16px));
+    min-width: 0;
+    max-height: calc(100vh - 16px);
   }
 
-  .tab-context-menu button {
-    display: flex;
-    align-items: center;
-    min-height: 32px;
-    padding: 0 10px;
-    border: 0;
-    border-radius: var(--radius-control);
-    color: inherit;
-    background: transparent;
-    font-size: 15px;
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .tab-context-menu button:hover:not(:disabled),
-  .tab-context-menu button:focus-visible:not(:disabled) {
-    background: var(--hover);
-  }
-
-  .app-shell .tab-context-menu button:focus-visible:not(:disabled),
   .app-shell .dropdown-menu button:focus-visible:not(:disabled) {
     outline-offset: -2px;
   }
@@ -5347,13 +5328,15 @@
   .dropdown-menu button {
     display: flex;
     align-items: center;
-    gap: 9px;
+    flex: 0 0 auto;
+    gap: 8px;
     min-height: 32px;
     padding: 0 9px;
     border: 0;
     border-radius: var(--radius-control);
     color: var(--text);
     background: transparent;
+    font-size: 15px;
     text-align: left;
     cursor: pointer;
   }
@@ -5404,6 +5387,7 @@
 
   .dropdown-menu button:not(.recent-menu-item) > span:nth-child(2) {
     flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -5419,9 +5403,11 @@
   }
 
   .dropdown-menu kbd {
+    margin-inline-start: auto;
     color: var(--subtle);
     font-size: 14px;
     font-family: inherit;
+    white-space: nowrap;
   }
 
   .dropdown-menu button:disabled kbd {
@@ -5649,7 +5635,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 16px;
+    flex-wrap: wrap;
+    gap: 8px 16px;
     min-height: 48px;
     padding: 6px 18px;
     border-bottom: 1px solid var(--line);
@@ -5659,14 +5646,20 @@
     line-height: 1.45;
   }
 
+  .external-banner > span {
+    flex: 1 1 280px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
   .external-banner > div {
     display: flex;
-    flex: 0 0 auto;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
   }
 
-  .external-banner .secondary-button {
+  .external-banner button {
     min-height: 32px;
     margin: 0;
     padding: 0 11px;
@@ -6339,7 +6332,10 @@
 
   .document-state p {
     margin: 0;
+    max-width: min(100%, 520px);
     font-size: 15px;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
   }
 
   .loading-ring {
@@ -6643,6 +6639,9 @@
     position: relative;
     z-index: 1;
     width: min(100%, 460px);
+    max-height: calc(100vh - 48px);
+    display: flex;
+    flex-direction: column;
     padding: 24px;
     border: 1px solid var(--line);
     border-radius: var(--radius-dialog);
@@ -6656,31 +6655,14 @@
     margin: 0;
     font-size: 20px;
     font-weight: 600;
+    line-height: 1.4;
   }
 
-  .confirm-dialog .confirm-dialog-close {
-    position: absolute;
-    top: 16px;
-    right: 16px;
-    display: grid;
-    width: 32px;
-    height: 32px;
-    place-items: center;
-    padding: 0;
-    border: 0;
-    border-radius: var(--radius-control);
-    color: var(--muted);
-    background: transparent;
-  }
-
-  .confirm-dialog .confirm-dialog-close:hover {
-    color: var(--text);
-    background: var(--hover);
-  }
-
-  .confirm-dialog .confirm-dialog-close :global(svg) {
-    width: 18px;
-    height: 18px;
+  .confirm-content {
+    min-height: 0;
+    overflow: auto;
+    overflow-wrap: anywhere;
+    overscroll-behavior: contain;
   }
 
   .confirm-dialog p {
@@ -6712,6 +6694,7 @@
 
   .dialog-actions {
     display: flex;
+    flex: 0 0 auto;
     align-items: center;
     flex-wrap: wrap;
     justify-content: flex-end;
@@ -6719,34 +6702,16 @@
     margin-top: 24px;
   }
 
-  .close-confirm-actions button {
-    min-width: 132px;
-    min-height: 38px;
-    border: 1px solid var(--line-strong);
-    background: var(--surface);
+  .dialog-actions button:not(.save-close-button) {
+    min-width: 72px;
   }
 
   .close-confirm-actions .danger-button {
-    color: var(--error);
-  }
-
-  .close-confirm-actions .danger-button:hover:not(:disabled) {
-    border-color: color-mix(in srgb, var(--error) 48%, var(--line));
-    background: var(--error-bg);
-  }
-
-  .close-confirm-actions .primary-button {
-    color: var(--accent);
-  }
-
-  .close-confirm-actions .primary-button:hover:not(:disabled) {
-    border-color: var(--accent);
-    color: var(--accent-foreground);
-    background: var(--accent);
+    margin-inline-end: auto;
   }
 
   .dialog-actions .danger-button + .secondary-button {
-    margin-left: 12px;
+    margin-inline-start: 12px;
   }
 
   .dialog-actions button:disabled {
