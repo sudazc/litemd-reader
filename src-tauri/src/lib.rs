@@ -4,9 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
+    sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
+use tauri::{Emitter, Manager, State};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,6 +42,9 @@ struct MarkdownFileStatus {
     path: String,
     version: Option<FileVersion>,
 }
+
+#[derive(Default)]
+struct PendingMarkdownFiles(Mutex<Vec<String>>);
 
 fn detect_encoding(bytes: &[u8]) -> &'static str {
     if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
@@ -172,18 +177,44 @@ fn read_markdown(path: String) -> Result<MarkdownDocument, String> {
 
 #[tauri::command]
 fn startup_markdown_files() -> Vec<String> {
-    std::env::args()
+    let working_directory = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    markdown_paths_from_args(std::env::args(), &working_directory)
+}
+
+/// 从启动参数提取 Markdown 路径，并按发起进程的目录解析相对路径
+fn markdown_paths_from_args(
+    arguments: impl IntoIterator<Item = String>,
+    working_directory: &Path,
+) -> Vec<String> {
+    arguments
+        .into_iter()
         .skip(1)
-        .filter(|argument| {
-            Path::new(argument)
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| {
-                    extension.eq_ignore_ascii_case("md")
-                        || extension.eq_ignore_ascii_case("markdown")
-                })
+        .filter_map(|argument| {
+            let path = Path::new(&argument);
+            let extension = path.extension()?.to_str()?;
+            let is_markdown =
+                extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown");
+            if !is_markdown {
+                return None;
+            }
+
+            let path = if path.is_absolute() {
+                path.to_owned()
+            } else {
+                working_directory.join(path)
+            };
+            Some(path.to_string_lossy().into_owned())
         })
         .collect()
+}
+
+#[tauri::command]
+fn take_pending_markdown_files(state: State<'_, PendingMarkdownFiles>) -> Vec<String> {
+    let mut pending = state
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::mem::take(&mut *pending)
 }
 
 #[tauri::command]
@@ -498,10 +529,36 @@ fn read_local_image(document_path: String, source: String) -> Result<String, Str
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(PendingMarkdownFiles::default())
+        .plugin(tauri_plugin_single_instance::init(|app, arguments, cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                if window.is_minimized().unwrap_or(false) {
+                    let _ = window.unminimize();
+                }
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+
+            let files = markdown_paths_from_args(arguments, Path::new(&cwd));
+            if files.is_empty() {
+                return;
+            }
+
+            {
+                let pending = app.state::<PendingMarkdownFiles>();
+                pending
+                    .0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .extend(files);
+            }
+            let _ = app.emit("single-instance-open-files", ());
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             startup_markdown_files,
+            take_pending_markdown_files,
             read_markdown,
             get_markdown_version,
             write_markdown,
@@ -516,8 +573,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_markdown, encode_markdown, read_local_image, read_markdown, resolve_markdown_link,
-        write_markdown,
+        decode_markdown, encode_markdown, markdown_paths_from_args, read_local_image,
+        read_markdown, resolve_markdown_link, write_markdown,
     };
     use std::{
         fs,
@@ -550,6 +607,32 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn resolves_startup_markdown_paths_using_the_launch_directory() {
+        let working_directory = TestDirectory::new();
+        let relative = "中文 笔记.MD";
+        let absolute = working_directory.path().join("另一个 文档.Markdown");
+        let absolute_argument = absolute.to_string_lossy().into_owned();
+        let arguments = [
+            "launcher.md".to_owned(),
+            relative.to_owned(),
+            "image.png".to_owned(),
+            absolute_argument.clone(),
+        ];
+
+        assert_eq!(
+            markdown_paths_from_args(arguments, working_directory.path()),
+            [
+                working_directory
+                    .path()
+                    .join(relative)
+                    .to_string_lossy()
+                    .into_owned(),
+                absolute_argument,
+            ]
+        );
     }
 
     #[test]

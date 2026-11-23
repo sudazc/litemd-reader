@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { invoke, isTauri } from "@tauri-apps/api/core";
   import { getVersion } from "@tauri-apps/api/app";
+  import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { open, save } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
@@ -200,6 +201,8 @@
   let searchCount = $state(0);
   let activeSearchIndex = $state(0);
   let activeHeadingId = $state<string | null>(null);
+  let readerHeadingSyncTimer: ReturnType<typeof setTimeout> | undefined;
+  let headingScrollPending = false;
   let notice = $state("");
   let tabContextMenu = $state<{ tabId: string; x: number; y: number } | null>(null);
   let zoomedImage = $state<{ src: string; alt: string } | null>(null);
@@ -211,6 +214,13 @@
   let confirmationReturnFocus: HTMLElement | null = null;
   let allowConfirmedWindowClose = false;
   let closePromptGeneration = 0;
+  let startupOpenReady = $state(false);
+  let nativeOpenSignaled = $state(false);
+  let forwardedPaths = $state.raw<string[]>([]);
+  let drainingNativeOpenRequests = false;
+  const documentInteractionBlocked = $derived(
+    Boolean(pendingConfirmation || pendingCloseIds.length || closeAfterConfirmation || zoomedImage),
+  );
   let editorComponent:
     | {
         scrollToLine(line: number): void;
@@ -954,7 +964,7 @@
         tabs = [...tabs, createLoadingTab(tab.path, tab.scrollTop, false, false)];
       }
 
-      await openPath(firstTab.path, undefined, firstTab.scrollTop);
+      await openPath(firstTab.path, { restoredScrollTop: firstTab.scrollTop });
     } finally {
       restoringSession = false;
       persistSession();
@@ -975,7 +985,14 @@
     if (restoreLastSession) void restoreSession();
   }
 
+  $effect(() => {
+    if (startupOpenReady && !documentInteractionBlocked && (nativeOpenSignaled || forwardedPaths.length)) {
+      void untrack(openPendingMarkdownFiles);
+    }
+  });
+
   onMount(() => {
+    let disposed = false;
     pointerCanHover = window.matchMedia("(hover: hover)").matches;
     const handleWindowFocus = () => {
       windowFocused = true;
@@ -1011,7 +1028,25 @@
     restorePreferences();
     if (isTauri()) void getVersion().then((version) => (appVersion = version)).catch(() => {});
     void restoreDraftRecovery();
-    void restoreStartupFiles();
+    if (isTauri()) {
+      void listen("single-instance-open-files", () => {
+        nativeOpenSignaled = true;
+      })
+        .then((unlisten) => {
+          if (disposed) {
+            unlisten();
+            return;
+          }
+          unlistenNativeEvents.push(unlisten);
+          nativeOpenSignaled = true;
+        })
+        .catch(() => {
+          if (!disposed) showNotice("无法接收再次打开的文件，请重启应用。");
+        });
+    }
+    void restoreStartupFiles().finally(() => {
+      if (!disposed && isTauri()) startupOpenReady = true;
+    });
     if (isTauri()) {
       const currentWindow = getCurrentWindow();
       void syncMaximizedState();
@@ -1030,7 +1065,7 @@
         }
         if (event.payload.type !== "drop") return;
         draggingFiles = false;
-        if (pendingConfirmation || pendingCloseIds.length || zoomedImage) return;
+        if (documentInteractionBlocked) return;
         const markdownPaths = event.payload.paths.filter((path) => /\.(?:md|markdown)$/i.test(path));
         if (markdownPaths.length < event.payload.paths.length) {
           showNotice("仅支持拖放 .md 和 .markdown 文件");
@@ -1062,9 +1097,27 @@
       const modifier = event.ctrlKey || event.metaKey;
       if (!modifier || !event.shiftKey || event.key.toLocaleLowerCase() !== "s") return;
       event.preventDefault();
-      if (!pendingCloseIds.length && !pendingConfirmation && !settingsOpen && !zoomedImage) {
+      if (!settingsOpen && !documentInteractionBlocked) {
         void saveActiveTab(true);
       }
+    };
+
+    const isTextEntryTarget = (target: EventTarget | null) => {
+      if (!(target instanceof HTMLElement)) return false;
+      if (target instanceof HTMLTextAreaElement || target.isContentEditable) return true;
+      if (!(target instanceof HTMLInputElement)) return false;
+      return ![
+        "button",
+        "checkbox",
+        "color",
+        "file",
+        "hidden",
+        "image",
+        "radio",
+        "range",
+        "reset",
+        "submit",
+      ].includes(target.type);
     };
 
     const handleKeydown = (event: KeyboardEvent) => {
@@ -1092,6 +1145,31 @@
         return;
       }
 
+      if (modifier && key === "a") {
+        if (
+          event.isComposing ||
+          isTextEntryTarget(event.target) ||
+          settingsOpen ||
+          documentInteractionBlocked ||
+          tabContextMenu ||
+          openMenu ||
+          !activeTab ||
+          activeTab.editing ||
+          activeTab.loading ||
+          activeTab.error ||
+          !readerContent
+        ) return;
+
+        const selection = window.getSelection();
+        if (!selection) return;
+        event.preventDefault();
+        const range = document.createRange();
+        range.selectNodeContents(readerContent);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return;
+      }
+
       if (settingsOpen) {
         if (modifier && key === "w") {
           event.preventDefault();
@@ -1100,7 +1178,7 @@
         return;
       }
 
-      if (zoomedImage || pendingCloseIds.length || pendingConfirmation) return;
+      if (documentInteractionBlocked) return;
 
       if (modifier && key === "p") {
         event.preventDefault();
@@ -1144,6 +1222,8 @@
     window.addEventListener("keydown", handleSaveAsKeydownCapture, true);
     window.addEventListener("keydown", handleKeydown);
     return () => {
+      disposed = true;
+      startupOpenReady = false;
       window.removeEventListener("focus", handleWindowFocus);
       window.removeEventListener("blur", handleWindowBlur);
       window.removeEventListener("keydown", handleSaveAsKeydownCapture, true);
@@ -1189,6 +1269,32 @@
     if (activeTabId === tab.id) editorComponent?.focusEditor();
   }
 
+  /** 串行读取原生队列，确认期间保留已经读到的路径 */
+  async function openPendingMarkdownFiles() {
+    if (drainingNativeOpenRequests) return;
+    drainingNativeOpenRequests = true;
+    try {
+      while (startupOpenReady && !documentInteractionBlocked) {
+        if (forwardedPaths.length) {
+          const paths = forwardedPaths;
+          forwardedPaths = [];
+          void openFiles(paths);
+        }
+        if (!nativeOpenSignaled) return;
+
+        nativeOpenSignaled = false;
+        try {
+          const paths = await invoke<string[]>("take_pending_markdown_files");
+          if (startupOpenReady) forwardedPaths = paths;
+        } catch {
+          if (startupOpenReady) showNotice("无法接收再次打开的文件，请重试。");
+        }
+      }
+    } finally {
+      drainingNativeOpenRequests = false;
+    }
+  }
+
   async function openFiles(paths?: string[]) {
     openMenu = null;
     try {
@@ -1203,43 +1309,48 @@
       const selectedPaths = Array.isArray(selection) ? selection : [selection];
       if (!selectedPaths.length) return;
       settingsOpen = false;
-      await Promise.all(selectedPaths.map((path) => openPath(path)));
+      await Promise.all(selectedPaths.map((path, index) =>
+        openPath(path, { activateOnOpen: index === selectedPaths.length - 1 }),
+      ));
     } catch {
       showNotice("文件选择失败，请重试。");
     }
   }
 
+  /** 将通过不同路径打开的同一文件汇合到已有标签 */
+  function mergeDuplicateTab(request: ReaderTab, canonicalId: string): boolean {
+    const duplicate = tabs.find((tab) => tab.id === canonicalId && tab !== request);
+    if (!duplicate) return false;
+
+    const wasSelected = activeTabId === request.id;
+    tabs = tabs.filter((tab) => tab !== request);
+    if (wasSelected) {
+      duplicate.pendingFragment = request.pendingFragment ?? duplicate.pendingFragment;
+      if (duplicate.error) void openPath(duplicate.path);
+      else void activateTab(duplicate.id);
+    } else {
+      scheduleSessionSave();
+    }
+    return true;
+  }
+
   async function openPath(
     path: string,
-    fragment?: string,
-    restoredScrollTop = 0,
-    forceReload = false,
-    activateOnOpen = true,
+    { fragment, restoredScrollTop = 0, forceReload = false, activateOnOpen = true }: {
+      fragment?: string;
+      restoredScrollTop?: number;
+      forceReload?: boolean;
+      activateOnOpen?: boolean;
+    } = {},
   ) {
     if (activateOnOpen) settingsOpen = false;
     const initialId = pathKey(path);
     const existing = tabs.find((tab) => tab.id === initialId || pathKey(tab.path) === initialId);
 
-    if (existing?.loading && existing.loadStarted) {
+    if (existing?.loadStarted && (existing.loading || (!forceReload && !existing.error))) {
       if (fragment) existing.pendingFragment = fragment;
       if (activateOnOpen) await activateTab(existing.id);
       return;
-    }
-
-    if (existing && !forceReload && !existing.error) {
-      const alreadyOpen = existing;
-      if (!alreadyOpen.loadStarted) {
-        if (fragment) alreadyOpen.pendingFragment = fragment;
-        alreadyOpen.loadStarted = true;
-        alreadyOpen.loading = true;
-        if (activateOnOpen) activeTabId = alreadyOpen.id;
-      } else {
-        if (activateOnOpen) {
-          await activateTab(alreadyOpen.id);
-          if (fragment) await jumpToAnchor(fragment, alreadyOpen.id);
-        }
-        return;
-      }
     }
 
     const loadTabId = existing?.id ?? initialId;
@@ -1256,14 +1367,15 @@
       existing.error = null;
       existing.externalChange = null;
       existing.editing = false;
-      if (activateOnOpen) activeTabId = existing.id;
+      if (fragment) existing.pendingFragment = fragment;
     } else {
       const loadingTab = createLoadingTab(path, restoredScrollTop, true);
       loadingTab.loadRequestId = loadRequestId;
+      loadingTab.pendingFragment = fragment;
       tabs = [...tabs, loadingTab];
-      if (activateOnOpen) activeTabId = initialId;
       scheduleSessionSave();
     }
+    if (activateOnOpen) activeTabId = loadTabId;
     openMenu = null;
 
     try {
@@ -1271,69 +1383,25 @@
         invoke<MarkdownDocument>("read_markdown", { path }),
         loadMarkdownModule(),
       ]);
-      if (!tabs.some((tab) => tab.id === loadTabId && tab.loadRequestId === loadRequestId)) {
-        return;
-      }
       const canonicalId = pathKey(document.path);
-      const duplicate = tabs.find(
-        (tab) => tab.id === canonicalId && tab.loadRequestId !== loadRequestId,
+      const request = tabs.find(
+        (tab) => tab.id === loadTabId && tab.loadRequestId === loadRequestId,
       );
-      if (duplicate) {
-        const pendingFragment = fragment ?? duplicate.pendingFragment;
-        const duplicateWasActive = activeTabId === loadTabId;
-        if (duplicate.loading && pendingFragment) {
-          duplicate.pendingFragment = pendingFragment;
-        }
-        tabs = tabs.filter(
-          (tab) => !(tab.id === loadTabId && tab.loadRequestId === loadRequestId),
-        );
-        scheduleSessionSave();
-        if (activateOnOpen || duplicateWasActive) {
-          await activateTab(duplicate.id);
-          if (pendingFragment && !duplicate.loading) {
-            await jumpToAnchor(pendingFragment, duplicate.id);
-          }
-        }
-        return;
-      }
+      if (!request || mergeDuplicateTab(request, canonicalId)) return;
 
-      const rendered = await markdown.renderMarkdown(document.content, (source) =>
-        invoke<string>("read_local_image", {
-          documentPath: document.path,
-          source,
-        }),
+      const rendered = await markdown.renderMarkdown(
+        document.content,
+        loadDocumentImage(document.path),
       );
       const currentRequest = tabs.find(
         (tab) => tab.id === loadTabId && tab.loadRequestId === loadRequestId,
       );
-      if (!currentRequest) return;
-      const duplicateAfterRender = tabs.find(
-        (tab) => tab.id === canonicalId && tab.loadRequestId !== loadRequestId,
-      );
-      if (duplicateAfterRender) {
-        const pendingFragment = fragment ?? duplicateAfterRender.pendingFragment;
-        const duplicateWasActive = activeTabId === loadTabId;
-        if (duplicateAfterRender.loading && pendingFragment) {
-          duplicateAfterRender.pendingFragment = pendingFragment;
-        }
-        tabs = tabs.filter(
-          (tab) => !(tab.id === loadTabId && tab.loadRequestId === loadRequestId),
-        );
-        scheduleSessionSave();
-        if (activateOnOpen || duplicateWasActive) {
-          await activateTab(duplicateAfterRender.id);
-          if (pendingFragment && !duplicateAfterRender.loading) {
-            await jumpToAnchor(pendingFragment, duplicateAfterRender.id);
-          }
-        }
-        return;
-      }
-      const pendingFragment = fragment ?? currentRequest.pendingFragment;
+      if (!currentRequest || mergeDuplicateTab(currentRequest, canonicalId)) return;
       const shouldActivate = activeTabId === loadTabId;
       const editorInstanceId = crypto.randomUUID();
 
       tabs = tabs.map((tab) =>
-        tab.id === loadTabId && tab.loadRequestId === loadRequestId
+        tab === currentRequest
           ? {
               ...tab,
               id: canonicalId,
@@ -1361,7 +1429,6 @@
               loadRequestId: null,
               loading: false,
               error: null,
-              pendingFragment: shouldActivate ? undefined : pendingFragment,
             }
           : tab,
       );
@@ -1370,14 +1437,10 @@
         activeHeadingId = rendered.headings[0]?.id ?? null;
       }
       rememberFile(document.path, document.name);
-      await tick();
-      const loadedTabIsCurrent = tabs.some(
+      const loadedTab = tabs.find(
         (tab) => tab.id === canonicalId && tab.editorInstanceId === editorInstanceId,
       );
-      if (loadedTabIsCurrent && shouldActivate && activeTabId === canonicalId) {
-        if (readerViewport) readerViewport.scrollTop = savedScrollTop;
-        if (pendingFragment) await jumpToAnchor(pendingFragment, canonicalId);
-      }
+      if (shouldActivate && loadedTab) await restoreActiveTabLocation(loadedTab);
       scheduleSessionSave();
     } catch (error) {
       const message = displayError(error, "无法显示这篇文档，请重试。");
@@ -1424,28 +1487,37 @@
     }
   }
 
+  /** 正文挂载后恢复活动标签的阅读位置，并处理待跳转的锚点 */
+  async function restoreActiveTabLocation(tab: ReaderTab) {
+    await tick();
+    if (activeTab !== tab || tab.loading || tab.error) return;
+
+    if (readerViewport && !tab.editing) readerViewport.scrollTop = tab.scrollTop;
+    if (tab.pendingFragment) {
+      const fragment = tab.pendingFragment;
+      tab.pendingFragment = undefined;
+      await jumpToAnchor(fragment, tab.id);
+    }
+    if (activeTab === tab && !tab.editing) syncActiveHeading();
+  }
+
   async function activateTab(id: string) {
+    const selected = tabs.find((tab) => tab.id === id);
+    if (!selected) return;
+
     settingsOpen = false;
-    if (tabs.find((tab) => tab.id === id)?.editing && searchOpen) closeSearch();
+    if (selected.editing && searchOpen) closeSearch();
+    if (activeTabId !== id) activeHeadingId = null;
     activeTabId = id;
     openMenu = null;
     tabContextMenu = null;
     scheduleSessionSave();
-    const selectedBeforeLoad = tabs.find((tab) => tab.id === id);
-    if (selectedBeforeLoad && !selectedBeforeLoad.loadStarted && !selectedBeforeLoad.error) {
-      void openPath(selectedBeforeLoad.path, undefined, selectedBeforeLoad.scrollTop);
+    if (!selected.loadStarted && !selected.error) {
+      void openPath(selected.path, { activateOnOpen: false });
+      return;
     }
-    await tick();
-    if (activeTabId !== id) return;
-    const selected = tabs.find((tab) => tab.id === id);
-    if (readerViewport && selected) readerViewport.scrollTop = selected.scrollTop;
-    if (selected?.pendingFragment && !selected.loading && !selected.error) {
-      const fragment = selected.pendingFragment;
-      selected.pendingFragment = undefined;
-      await jumpToAnchor(fragment, id);
-    }
-    syncActiveHeading();
-    if (selected && !selected.loading && !selected.error) {
+    await restoreActiveTabLocation(selected);
+    if (activeTab === selected && !selected.loading && !selected.error) {
       void checkTabForExternalChange(selected);
     }
   }
@@ -1627,7 +1699,6 @@
     }
     if (closePromptGeneration !== promptGeneration) return;
     pendingCloseIds = [];
-    closeAfterConfirmation = false;
     closePromptGeneration += 1;
     if (shouldCloseWindow) {
       persistSession();
@@ -1639,10 +1710,12 @@
         await getCurrentWindow().close();
       } catch (error) {
         allowConfirmedWindowClose = false;
+        closeAfterConfirmation = false;
         showNotice("关闭窗口失败：" + displayError(error, "请再试一次。"));
       }
       return;
     }
+    closeAfterConfirmation = false;
     performCloseTabs(closing);
   }
 
@@ -1656,6 +1729,10 @@
     const closing = new Set(ids);
     const oldIndex = tabs.findIndex((tab) => tab.id === activeTabId);
     const wasActive = !!activeTabId && closing.has(activeTabId);
+    const nextTab = wasActive
+      ? tabs.find((tab, index) => index > oldIndex && !closing.has(tab.id)) ??
+        tabs.findLast((tab, index) => index < oldIndex && !closing.has(tab.id))
+      : undefined;
     for (const tab of tabs) {
       if (!closing.has(tab.id)) continue;
       const outlineTimer = editorOutlineTimers.get(tab.editorInstanceId);
@@ -1665,21 +1742,13 @@
     tabs = tabs.filter((tab) => !closing.has(tab.id));
     persistDraftRecovery(tabs);
 
-    if (wasActive) {
-      const nextTab = tabs[Math.min(Math.max(0, oldIndex), tabs.length - 1)];
-      activeTabId = nextTab?.id ?? null;
-      activeHeadingId = nextTab?.headings[0]?.id ?? null;
-      void tick().then(() => {
-        if (activeTabId !== nextTab?.id) return;
-        if (readerViewport && nextTab) readerViewport.scrollTop = nextTab.scrollTop;
-        syncActiveHeading();
-      });
-    }
-    if (tabs.length === 0) {
+    if (!tabs.length) {
       activeTabId = null;
       searchOpen = false;
       searchQuery = "";
       activeHeadingId = null;
+    } else if (nextTab) {
+      void activateTab(nextTab.id);
     }
     scheduleSessionSave();
   }
@@ -1849,13 +1918,11 @@
       if (!currentTab) return;
       const pendingSave = saveOperations.get(currentTab);
       if (!pendingSave) {
-        await openPath(
-          currentTab.path,
-          undefined,
-          currentTab.scrollTop,
-          true,
-          activeTabId === currentTab.id,
-        );
+        await openPath(currentTab.path, {
+          restoredScrollTop: currentTab.scrollTop,
+          forceReload: true,
+          activateOnOpen: activeTabId === currentTab.id,
+        });
         return;
       }
       try {
@@ -2247,13 +2314,33 @@
     void activateTab(nextId);
   }
 
+  function clearReaderHeadingScroll() {
+    if (readerHeadingSyncTimer) clearTimeout(readerHeadingSyncTimer);
+    readerHeadingSyncTimer = undefined;
+    headingScrollPending = false;
+  }
+
+  $effect(() => {
+    activeTabId;
+    readerViewport;
+    return clearReaderHeadingScroll;
+  });
+
+  function scheduleReaderHeadingSync() {
+    if (readerHeadingSyncTimer) clearTimeout(readerHeadingSyncTimer);
+    readerHeadingSyncTimer = setTimeout(() => {
+      readerHeadingSyncTimer = undefined;
+      headingScrollPending = false;
+    }, 160);
+  }
+
   function handleReaderScroll(event: Event) {
     const viewport = event.currentTarget as HTMLDivElement;
-    if (activeTab) {
-      activeTab.scrollTop = viewport.scrollTop;
-    }
+    if (viewport !== readerViewport || !activeTab || activeTab.editing || activeTab.loading) return;
+    activeTab.scrollTop = viewport.scrollTop;
     scheduleSessionSave();
-    syncActiveHeading();
+    if (headingScrollPending) scheduleReaderHeadingSync();
+    else syncActiveHeading();
   }
 
   function setReaderScrollProgress(progress: number) {
@@ -2270,6 +2357,7 @@
   }
 
   function syncActiveHeading() {
+    if (headingScrollPending) return;
     if (!readerViewport || !readerContent || !activeTab?.headings.length) {
       activeHeadingId = null;
       return;
@@ -2297,6 +2385,13 @@
     activeHeadingId = activeTab.headings[Math.max(0, low - 1)]?.id ?? null;
   }
 
+  function scrollReaderToHeading(id: string, element: Element) {
+    headingScrollPending = true;
+    activeHeadingId = id;
+    element.scrollIntoView({ behavior: scrollBehavior(), block: "start" });
+    scheduleReaderHeadingSync();
+  }
+
   function jumpToHeading(heading: DocumentHeading) {
     if (activeTab?.editing) {
       editorComponent?.scrollToLine(heading.line);
@@ -2305,8 +2400,7 @@
     }
     const element = findReaderAnchor(heading.id);
     if (element) {
-      element.scrollIntoView({ behavior: scrollBehavior(), block: "start" });
-      activeHeadingId = heading.id;
+      scrollReaderToHeading(heading.id, element);
     }
   }
 
@@ -2329,10 +2423,11 @@
     }
     const element = findReaderAnchor(id);
     if (!element) return;
-    element.scrollIntoView({ behavior: scrollBehavior(), block: "start" });
     if (expectedTab.headings.some((heading) => heading.id === id)) {
-      activeHeadingId = id;
+      scrollReaderToHeading(id, element);
+      return;
     }
+    element.scrollIntoView({ behavior: scrollBehavior(), block: "start" });
   }
 
   function setTheme(value: string) {
@@ -2748,14 +2843,16 @@
       return;
     }
 
-    const documentPath = activeTab?.path;
-    if (!documentPath) return;
+    const sourceTab = activeTab;
+    if (!sourceTab?.path) return;
     try {
       const targetPath = await invoke<string>("resolve_markdown_link", {
-        documentPath,
+        documentPath: sourceTab.path,
         source: path,
       });
-      await openPath(targetPath, fragment);
+      if (tabs.includes(sourceTab)) {
+        await openPath(targetPath, { fragment, activateOnOpen: activeTab === sourceTab });
+      }
     } catch {
       showNotice("无法打开链接中的 Markdown 文档。");
     }
@@ -3205,7 +3302,7 @@
       <button
         class="titlebar-action settings-toggle"
         aria-label={settingsOpen ? "关闭设置" : "设置"}
-        title={settingsOpen ? "关闭设置" : "设置"}
+        title={settingsOpen ? "关闭设置" : undefined}
         aria-controls="settings-panel"
         aria-pressed={settingsOpen}
         onclick={toggleSettings}
@@ -3220,62 +3317,74 @@
     {#if activeTab && !settingsOpen}
     <div class="toolbar-right">
       {#if activeTab && !activeTab.loading && !activeTab.error}
-        <div class="document-navigation-actions" role="group" aria-label="文档导航">
-          <div class="menu-wrap search-menu-wrap">
-            <button
-              class="tool-button tool-button-label"
-              aria-label="查找"
-              title="查找当前文档 (Ctrl+F)"
-              aria-expanded={Boolean(searchOpen && !activeTab.editing)}
-              aria-controls="reader-search-popover"
-              disabled={!activeTab || activeTab.loading || !!activeTab.error}
-              onclick={() => { if (activeTab?.editing) editorComponent?.toggleSearch(); else toggleReaderSearch(); }}
-            >
-              <Search size={18} /><span>查找</span>
-            </button>
-            {#if searchOpen && !activeTab.editing}
-              <div
-                id="reader-search-popover"
-                class="search-popover"
-                role="search"
+        <div class="document-controls" role="group" aria-label="文档工具">
+          <div class="document-navigation-actions" role="group" aria-label="文档导航">
+            <div class="menu-wrap search-menu-wrap">
+              <button
+                class="tool-button tool-button-label"
                 aria-label="查找当前文档"
-                transition:popupTransition={{ duration: 160 }}
+                title="查找当前文档 (Ctrl+F)"
+                aria-expanded={activeTab.editing ? undefined : searchOpen}
+                aria-controls={searchOpen && !activeTab.editing ? "reader-search-popover" : undefined}
+                onclick={() => { if (activeTab?.editing) editorComponent?.toggleSearch(); else toggleReaderSearch(); }}
               >
-                <div class="search-popover-header">
-                  <div class="search-popover-title"><Search size={16} aria-hidden="true" /><strong>查找</strong></div>
-                  <button class="search-close" aria-label="关闭查找" title="关闭查找" onclick={closeSearch}><X size={16} /></button>
-                </div>
-                <div class="search-popover-body">
-                  <div class="search-box search-popover-field">
-                    <Search size={16} aria-hidden="true" />
-                    <input bind:this={searchInput} bind:value={searchQuery} placeholder="查找当前文档" aria-label="查找当前文档" onkeydown={handleSearchKeydown} />
+                <Search size={18} /><span>查找</span>
+              </button>
+              {#if searchOpen && !activeTab.editing}
+                <div
+                  id="reader-search-popover"
+                  class="search-popover"
+                  role="search"
+                  aria-label="查找当前文档"
+                  transition:popupTransition={{ duration: 160 }}
+                >
+                  <div class="search-popover-header">
+                    <div class="search-popover-title"><Search size={16} aria-hidden="true" /><strong>查找</strong></div>
+                    <button class="search-close" aria-label="关闭查找" title="关闭查找" onclick={closeSearch}><X size={16} /></button>
                   </div>
-                  <div class="search-popover-footer">
-                    <span
-                      class="search-count"
-                      class:search-count-empty={!searchQuery.trim()}
-                      class:search-count-has-results={Boolean(searchQuery.trim()) && searchCount > 0}
-                      class:search-count-no-results={Boolean(searchQuery.trim()) && searchCount === 0}
-                      aria-live="polite"
-                      aria-atomic="true"
-                    >{searchQuery.trim() ? (searchCount ? activeSearchIndex + 1 + " / " + searchCount : "无匹配结果") : ""}</span>
-                    <div class="search-popover-navigation">
-                      <button class="search-step" aria-label="上一个匹配项" title="上一个匹配项" disabled={searchCount === 0} onclick={() => moveSearchMatch(-1)}><ChevronLeft size={16} /></button>
-                      <button class="search-step" aria-label="下一个匹配项" title="下一个匹配项" disabled={searchCount === 0} onclick={() => moveSearchMatch(1)}><ChevronRight size={16} /></button>
+                  <div class="search-popover-body">
+                    <div class="search-box search-popover-field">
+                      <Search size={16} aria-hidden="true" />
+                      <input bind:this={searchInput} bind:value={searchQuery} placeholder="查找当前文档" aria-label="查找当前文档" onkeydown={handleSearchKeydown} />
+                    </div>
+                    <div class="search-popover-footer">
+                      <span
+                        class="search-count"
+                        class:search-count-empty={!searchQuery.trim()}
+                        class:search-count-has-results={Boolean(searchQuery.trim()) && searchCount > 0}
+                        class:search-count-no-results={Boolean(searchQuery.trim()) && searchCount === 0}
+                        aria-live="polite"
+                        aria-atomic="true"
+                      >{searchQuery.trim() ? (searchCount ? activeSearchIndex + 1 + " / " + searchCount : "无匹配结果") : ""}</span>
+                      <div class="search-popover-navigation">
+                        <button class="search-step" aria-label="上一个匹配项" title="上一个匹配项" disabled={searchCount === 0} onclick={() => moveSearchMatch(-1)}><ChevronLeft size={16} /></button>
+                        <button class="search-step" aria-label="下一个匹配项" title="下一个匹配项" disabled={searchCount === 0} onclick={() => moveSearchMatch(1)}><ChevronRight size={16} /></button>
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-            {/if}
+              {/if}
+            </div>
+            <button
+              class="tool-button tool-button-label"
+              aria-label="文档目录"
+              title={tocVisible ? "隐藏目录" : "显示目录"}
+              aria-pressed={tocVisible}
+              onclick={toggleOutlinePanel}
+            >
+              {#if tocVisible}<PanelLeftClose size={18} />{:else}<PanelLeftOpen size={18} />{/if}<span>目录</span>
+            </button>
           </div>
+          <span class="document-controls-divider" aria-hidden="true"></span>
           <button
-            class="tool-button tool-button-label"
-            aria-label="文档目录"
-            title={tocVisible ? "隐藏目录" : "显示目录"}
-            aria-pressed={Boolean(activeTab && tocVisible)}
-            onclick={toggleOutlinePanel}
+            class="window-mode-toggle"
+            aria-label={activeTab.editing ? "切换到阅读模式（当前为编辑）" : "切换到编辑模式（当前为阅读）"}
+            title={activeTab.editing ? "切换到阅读" : "切换到编辑"}
+            aria-pressed={activeTab.editing}
+            onclick={() => void toggleEditing()}
           >
-            {#if tocVisible}<PanelLeftClose size={18} />{:else}<PanelLeftOpen size={18} />{/if}<span>目录</span>
+            {#if activeTab.editing}<Pencil size={16} />{:else}<BookOpen size={16} />{/if}
+            <span>{activeTab.editing ? "编辑" : "阅读"}</span>
           </button>
         </div>
       {/if}
@@ -3290,18 +3399,6 @@
   {/if}
 
     <div class="titlebar-preferences" role="group" aria-label="显示选项">
-      {#if activeTab && !activeTab.loading && !activeTab.error && !settingsOpen}
-        <button
-          class="window-mode-toggle"
-          aria-label={activeTab.editing ? "切换到阅读模式（当前为编辑）" : "切换到编辑模式（当前为阅读）"}
-          title={activeTab.editing ? "切换到阅读" : "切换到编辑"}
-          aria-pressed={activeTab.editing}
-          onclick={() => void toggleEditing()}
-        >
-          {#if activeTab.editing}<Pencil size={16} />{:else}<BookOpen size={16} />{/if}
-          <span>{activeTab.editing ? "编辑" : "阅读"}</span>
-        </button>
-      {/if}
       <button
         class="theme-toggle"
         aria-label={darkMode ? "切换到浅色主题" : "切换到深色主题"}
@@ -3823,6 +3920,7 @@
     --line: #e2e5ea;
     --line-strong: #818a99;
     --accent: #3d5bc3;
+    --accent-secondary: #23877f;
     --accent-foreground: #ffffff;
     --accent-hover: #324ca8;
     --accent-pressed: #2b4192;
@@ -3891,6 +3989,7 @@
     --line: #323640;
     --line-strong: #707989;
     --accent: #a7b8ff;
+    --accent-secondary: #77c9bd;
     --accent-foreground: #1d263e;
     --accent-hover: #bcc8ff;
     --accent-pressed: #94a7f1;
@@ -4539,7 +4638,8 @@
     position: relative;
     display: flex;
     align-items: center;
-    flex: 0 0 200px;
+    flex: 0 1 auto;
+    width: 200px;
     min-width: 112px;
     max-width: 220px;
     height: 36px;
@@ -4552,7 +4652,7 @@
 
   .tab-shell.selected {
     color: var(--text);
-    background: var(--reading-surface);
+    background: color-mix(in srgb, var(--accent) 5%, var(--reading-surface));
     border-bottom-color: var(--accent);
   }
 
@@ -4584,6 +4684,7 @@
   .tab-button,
   .tab-close,
   .titlebar-preferences button,
+  .window-mode-toggle,
   .window-controls button,
   .tool-button,
   .search-step,
@@ -4736,6 +4837,7 @@
   .titlebar-preferences button:hover,
   .window-controls button:hover,
   .tool-button:hover:not(:disabled),
+  .document-controls .window-mode-toggle:hover,
   .search-step:hover:not(:disabled),
   .search-close:hover:not(:disabled),
   .settings-close:hover:not(:disabled) {
@@ -4747,6 +4849,11 @@
     --button-pressed-bg: var(--accent-soft);
     color: var(--accent);
     background: var(--accent-soft);
+  }
+
+  .document-controls .window-mode-toggle[aria-pressed="true"] {
+    color: var(--accent);
+    background: var(--selected-bg);
   }
 
   .tab-drag-space {
@@ -4788,28 +4895,10 @@
     color: var(--muted);
   }
 
-  .titlebar-preferences .window-mode-toggle,
   .titlebar-preferences .theme-toggle {
     align-self: center;
     height: 32px;
     border-radius: var(--radius-control);
-  }
-
-  .titlebar-preferences .window-mode-toggle {
-    display: inline-flex;
-    flex: 0 0 76px;
-    align-items: center;
-    justify-content: center;
-    width: 76px;
-    gap: 6px;
-    margin: 0 4px;
-    padding: 0 7px;
-    font-size: 14px;
-  }
-
-  .titlebar-preferences .window-mode-toggle[aria-pressed="true"] {
-    color: var(--accent);
-    background: var(--selected-bg);
   }
 
   .titlebar-preferences .theme-toggle {
@@ -4918,6 +5007,41 @@
     align-items: center;
     min-width: 0;
     gap: 2px;
+  }
+
+  .document-controls {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .document-controls .tool-button,
+  .document-controls .window-mode-toggle {
+    height: 36px;
+    border-radius: var(--radius-control);
+  }
+
+  .document-controls .window-mode-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-width: 68px;
+    padding: 0 9px;
+    color: var(--muted);
+    font-size: 14px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .document-controls-divider {
+    flex: 0 0 1px;
+    width: 1px;
+    height: 18px;
+    margin-inline: 2px;
+    background: var(--line-strong);
+    opacity: 0.45;
   }
 
   .tool-button {
@@ -5429,12 +5553,6 @@
     background: var(--surface);
   }
 
-  @media (max-width: 1172px) {
-    .tab-shell {
-      flex: 0 1 200px;
-    }
-  }
-
   .search-box input {
     flex: 1;
     width: 100px;
@@ -5506,6 +5624,20 @@
 
   .reader-layout.with-outline {
     grid-template-columns: minmax(200px, var(--outline-width)) 8px minmax(0, 1fr);
+  }
+
+  /* 目录退出动画期间固定正文列，避免退出中的侧栏把正文挤到下一行 */
+  @media (min-width: 821px) {
+    .reader-layout:has(> .outline-panel) {
+      grid-template-columns: minmax(200px, var(--outline-width)) 8px minmax(0, 1fr);
+    }
+
+    .reader-layout:has(> .outline-panel) > .reader-viewport,
+    .reader-layout:has(> .outline-panel) > .editor-workspace,
+    .reader-layout:has(> .outline-panel) > .document-state,
+    .reader-layout:has(> .outline-panel) > .empty-workspace {
+      grid-column: 3;
+    }
   }
 
   .reader-layout.external-changed {
@@ -5607,12 +5739,13 @@
   }
 
   .outline-item {
-    display: -webkit-box;
+    position: relative;
+    display: block;
     width: 100%;
     min-width: 0;
+    flex-shrink: 0;
     min-height: 32px;
     padding: 5px 6px 5px var(--heading-indent);
-    overflow: hidden;
     border: 0;
     border-radius: var(--radius-control);
     color: var(--muted);
@@ -5621,23 +5754,39 @@
     font-weight: 400;
     line-height: 1.4;
     text-align: left;
-    text-overflow: ellipsis;
-    line-clamp: 2;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    cursor: pointer;
+  }
+
+  .outline-item > span {
+    display: -webkit-box;
+    overflow: hidden;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
-    cursor: pointer;
+    line-clamp: 2;
   }
 
   .outline-item:hover {
     color: var(--text);
-    background: var(--hover);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
   }
 
   .outline-item.current {
     --button-pressed-bg: var(--selected-bg);
     color: var(--accent);
     background: var(--selected-bg);
-    font-weight: 600;
+  }
+
+  .outline-item.current::before {
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    left: 5px;
+    width: 2px;
+    border-radius: 2px;
+    background: var(--accent);
+    content: "";
   }
 
   .empty-workspace {
@@ -5833,6 +5982,8 @@
 
   .reader-content :global(h1) {
     margin: 1.4em 0 0.78em;
+    padding-left: 14px;
+    border-left: 3px solid var(--accent);
     font-size: 1.8em;
     line-height: 1.3;
     font-weight: 650;
@@ -5843,6 +5994,17 @@
     font-size: 1.4em;
     line-height: 1.4;
     font-weight: 650;
+  }
+
+  .reader-content :global(h2)::before {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    margin-right: 10px;
+    border-radius: 2px;
+    background: var(--accent);
+    content: "";
+    vertical-align: 0.2em;
   }
 
   .reader-content :global(h3) {
@@ -5899,7 +6061,7 @@
   .reader-content :global(blockquote) {
     margin: 1.25em 0;
     padding: 0.12em 0 0.12em 1.05em;
-    border-left: 3px solid var(--line-strong);
+    border-left: 3px solid var(--accent-secondary);
     color: var(--muted);
   }
 
@@ -6272,6 +6434,7 @@
       --line: ButtonBorder;
       --line-strong: ButtonBorder;
       --accent: Highlight;
+      --accent-secondary: Highlight;
       --accent-foreground: HighlightText;
       --accent-hover: Highlight;
       --accent-pressed: Highlight;
@@ -6696,15 +6859,26 @@
     z-index: 120;
   }
 
+  @media (max-width: 1119px) {
+    .document-controls .tool-button-label {
+      width: 36px;
+      min-width: 36px;
+      padding: 0;
+    }
+
+    .document-controls .tool-button-label span {
+      display: none;
+    }
+  }
+
   @media (max-width: 820px) {
     .window-controls button {
       width: 40px;
       flex-basis: 40px;
     }
 
-    .titlebar-preferences .window-mode-toggle {
-      width: 72px;
-      flex-basis: 72px;
+    .document-controls {
+      gap: 3px;
     }
 
     .titlebar-preferences .theme-toggle {
@@ -6765,12 +6939,13 @@
       flex-basis: 34px;
     }
 
-    .titlebar-preferences .window-mode-toggle {
-      width: 66px;
-      flex-basis: 66px;
-      gap: 4px;
-      margin-inline: 2px;
-      padding-inline: 3px;
+    .document-controls .tool-button-label {
+      width: 32px;
+      min-width: 32px;
+    }
+
+    .document-controls-divider {
+      margin-inline: 1px;
     }
 
     .titlebar-preferences .theme-toggle {
