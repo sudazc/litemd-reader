@@ -3391,14 +3391,13 @@
           </div>
           <span class="document-controls-divider" aria-hidden="true"></span>
           <button
-            class="window-mode-toggle"
+            class="tool-button window-mode-toggle"
             aria-label={activeTab.editing ? "切换到阅读模式（当前为编辑）" : "切换到编辑模式（当前为阅读）"}
             title={activeTab.editing ? "切换到阅读" : "切换到编辑"}
             aria-pressed={activeTab.editing}
             onclick={() => void toggleEditing()}
           >
-            {#if activeTab.editing}<Pencil size={16} />{:else}<BookOpen size={16} />{/if}
-            <span>{activeTab.editing ? "编辑" : "阅读"}</span>
+            {#if activeTab.editing}<Pencil size={16} aria-hidden="true" />{:else}<BookOpen size={16} aria-hidden="true" />{/if}
           </button>
         </div>
       {/if}
@@ -4693,7 +4692,6 @@
   .tab-button,
   .tab-close,
   .titlebar-preferences button,
-  .window-mode-toggle,
   .window-controls button,
   .tool-button,
   .search-step,
@@ -4846,7 +4844,6 @@
   .titlebar-preferences button:hover,
   .window-controls button:hover,
   .tool-button:hover:not(:disabled),
-  .document-controls .window-mode-toggle:hover,
   .search-step:hover:not(:disabled),
   .search-close:hover:not(:disabled),
   .settings-close:hover:not(:disabled) {
@@ -4858,11 +4855,6 @@
     --button-pressed-bg: var(--accent-soft);
     color: var(--accent);
     background: var(--accent-soft);
-  }
-
-  .document-controls .window-mode-toggle[aria-pressed="true"] {
-    color: var(--accent);
-    background: var(--selected-bg);
   }
 
   .tab-drag-space {
@@ -5025,23 +5017,12 @@
     gap: 4px;
   }
 
-  .document-controls .tool-button,
-  .document-controls .window-mode-toggle {
+  .document-controls .tool-button {
     height: 36px;
-    border-radius: var(--radius-control);
   }
 
   .document-controls .window-mode-toggle {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    min-width: 68px;
-    padding: 0 9px;
-    color: var(--muted);
-    font-size: 14px;
-    font-weight: 500;
-    white-space: nowrap;
+    width: 36px;
   }
 
   .document-controls-divider {
@@ -5091,7 +5072,6 @@
   .app-shell .settings-nav button:focus-visible,
   .app-shell .settings-segmented button:focus-visible,
   .app-shell .font-size-stepper button:focus-visible,
-  .app-shell .window-mode-toggle:focus-visible,
   .app-shell .theme-toggle:focus-visible {
     outline-offset: -2px;
   }
@@ -6473,7 +6453,6 @@
 
     .app-shell .settings-nav button.active,
     .app-shell .settings-segmented button.active,
-    .app-shell .window-mode-toggle[aria-pressed="true"],
     .app-shell .tool-button[aria-pressed="true"],
     .app-shell .titlebar-action[aria-pressed="true"],
     .app-shell .menu-trigger[aria-expanded="true"],
@@ -6904,7 +6883,8 @@
       flex-basis: 34px;
     }
 
-    .document-controls .tool-button-label {
+    .document-controls .tool-button-label,
+    .document-controls .window-mode-toggle {
       width: 32px;
       min-width: 32px;
     }
