@@ -91,11 +91,13 @@ const readerStyles = `
   .reader-content .reader-code-block { margin: 1.35em 0 1.6em; }
   .reader-content .reader-code-block pre { margin: 0; padding-top: 17px; }
   .reader-content .reader-code-copy { display: none; }
-  .reader-content .reader-table-wrap { width: 100%; max-width: 100%; overflow-x: auto; margin: 1.4em 0 1.8em; overscroll-behavior-x: contain; }
+  .reader-content .reader-table-wrap { overflow-x: auto; margin: 1.4em 0 1.8em; border: 1px solid var(--line); border-radius: 8px; overscroll-behavior-x: contain; }
   .reader-content .reader-table-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .reader-content table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
-  .reader-content th, .reader-content td { padding: 10px 14px; border: 1px solid var(--line); text-align: left; vertical-align: top; word-break: normal; }
-  .reader-content th { background: var(--code-bg); font-weight: 600; }
+  .reader-content table { width: 100%; border-collapse: collapse; font-size: 0.9em; font-variant-numeric: tabular-nums; line-height: 1.5; }
+  .reader-content th, .reader-content td { min-width: 6em; padding: 0.55em 0.78em; text-align: left; vertical-align: top; word-break: normal; }
+  .reader-content thead { background: var(--surface-muted); }
+  .reader-content th { font-weight: 600; }
+  .reader-content tbody tr { border-top: 1px solid var(--line); }
   .reader-content img { display: block; max-width: 100%; height: auto; margin: 1.3em auto; border-radius: 5px; }
   .reader-content .katex-display { margin: 1.2em 0; overflow-x: auto; overflow-y: hidden; padding: 0.12em 0; }
   .reader-content .katex-error { color: var(--error); white-space: normal; }
@@ -145,6 +147,8 @@ const readerStyles = `
     .reader-content { width: auto; min-height: 0; max-width: none; padding: 0; color: #20242a; }
     .reader-content a { color: #20242a; text-decoration: underline; }
     .reader-content pre { overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .reader-content .reader-table-wrap { overflow: visible; border-radius: 0; }
+    .reader-content th, .reader-content td { min-width: 0; padding: 0.3em 0.45em; }
     .reader-content pre, .reader-content .reader-table-wrap, .reader-content table, .reader-content img, .reader-content .mermaid-block { break-inside: avoid; }
     .reader-content h1, .reader-content h2, .reader-content h3, .reader-content h4 { break-after: avoid-page; }
     .reader-content p, .reader-content li { orphans: 3; widows: 3; }

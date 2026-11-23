@@ -2265,6 +2265,10 @@
     }
   }
 
+  function findReaderAnchor(id: string) {
+    return readerContent?.querySelector(`#${CSS.escape(id)}`);
+  }
+
   function syncActiveHeading() {
     if (!readerViewport || !readerContent || !activeTab?.headings.length) {
       activeHeadingId = null;
@@ -2283,12 +2287,8 @@
     let high = activeTab.headings.length;
     while (low < high) {
       const middle = Math.floor((low + high) / 2);
-      const element = document.getElementById(activeTab.headings[middle].id);
-      if (
-        element &&
-        readerContent.contains(element) &&
-        element.getBoundingClientRect().top <= threshold
-      ) {
+      const element = findReaderAnchor(activeTab.headings[middle].id);
+      if (element && element.getBoundingClientRect().top <= threshold) {
         low = middle + 1;
       } else {
         high = middle;
@@ -2303,8 +2303,8 @@
       activeHeadingId = heading.id;
       return;
     }
-    const element = document.getElementById(heading.id);
-    if (element && readerContent?.contains(element)) {
+    const element = findReaderAnchor(heading.id);
+    if (element) {
       element.scrollIntoView({ behavior: scrollBehavior(), block: "start" });
       activeHeadingId = heading.id;
     }
@@ -2327,8 +2327,8 @@
       activeHeadingId = heading.id;
       return;
     }
-    const element = document.getElementById(id);
-    if (!element || !readerContent?.contains(element)) return;
+    const element = findReaderAnchor(id);
+    if (!element) return;
     element.scrollIntoView({ behavior: scrollBehavior(), block: "start" });
     if (expectedTab.headings.some((heading) => heading.id === id)) {
       activeHeadingId = id;
@@ -2518,21 +2518,21 @@
   }
 
   function clearSearchHighlights() {
-    if (!readerContent) return;
-    readerContent.querySelectorAll("mark.reader-search-hit").forEach((mark) => {
-      mark.replaceWith(document.createTextNode(mark.textContent ?? ""));
-    });
-    readerContent.normalize();
+    const marks = readerContent?.querySelectorAll("mark.reader-search-hit");
+    if (marks?.length) {
+      marks.forEach((mark) => mark.replaceWith(mark.textContent ?? ""));
+      readerContent?.normalize();
+    }
     searchCount = 0;
     activeSearchIndex = 0;
   }
 
   function applySearchHighlights(query: string) {
-    if (!readerContent) return;
     clearSearchHighlights();
     const term = query.trim();
-    if (!term) return;
+    if (!readerContent || !term) return;
     const escapedTerm = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const matcher = new RegExp(escapedTerm, "giu");
 
     const walker = document.createTreeWalker(readerContent, NodeFilter.SHOW_TEXT);
     const textNodes: Text[] = [];
@@ -2546,7 +2546,6 @@
     let matchIndex = 0;
     for (const node of textNodes) {
       const value = node.nodeValue ?? "";
-      const matcher = new RegExp(escapedTerm, "giu");
       let match = matcher.exec(value);
       if (!match) continue;
 
@@ -2556,7 +2555,7 @@
         const position = match.index;
         fragment.append(document.createTextNode(value.slice(cursor, position)));
         const mark = document.createElement("mark");
-        mark.className = "reader-search-hit";
+        mark.className = matchIndex === 0 ? "reader-search-hit current" : "reader-search-hit";
         mark.dataset.searchIndex = String(matchIndex);
         mark.textContent = match[0];
         fragment.append(mark);
@@ -2569,28 +2568,18 @@
     }
 
     searchCount = matchIndex;
-    activeSearchIndex = 0;
-    setActiveSearchMatch(false);
-  }
-
-  function setActiveSearchMatch(scroll: boolean) {
-    if (!readerContent || searchCount === 0) return;
-    const marks = Array.from(
-      readerContent.querySelectorAll<HTMLElement>("mark.reader-search-hit"),
-    );
-    marks.forEach((mark, index) => {
-      mark.classList.toggle("current", index === activeSearchIndex);
-    });
-    if (scroll) {
-      marks[activeSearchIndex]?.scrollIntoView({ behavior: "auto", block: "center" });
-    }
   }
 
   function moveSearchMatch(direction: number) {
-    if (searchCount === 0) return;
+    if (!readerContent || searchCount === 0) return;
+    readerContent.querySelector("mark.reader-search-hit.current")?.classList.remove("current");
     activeSearchIndex =
       (activeSearchIndex + direction + searchCount) % searchCount;
-    setActiveSearchMatch(true);
+    const match = readerContent.querySelector(
+      `mark.reader-search-hit[data-search-index="${activeSearchIndex}"]`,
+    );
+    match?.classList.add("current");
+    match?.scrollIntoView({ behavior: "auto", block: "center" });
   }
 
   function handleSearchKeydown(event: KeyboardEvent) {
@@ -2602,11 +2591,15 @@
 
   $effect(() => {
     const tabId = activeTab?.id;
+    const html = activeTab?.html;
+    const content = readerContent;
     const isSearchOpen = searchOpen;
     const query = searchQuery;
     void tick().then(() => {
       if (
         activeTab?.id !== tabId ||
+        activeTab?.html !== html ||
+        readerContent !== content ||
         searchOpen !== isSearchOpen ||
         searchQuery !== query
       ) return;
@@ -5267,10 +5260,6 @@
     color: var(--muted);
   }
 
-  .dropdown-menu button[role="menuitemradio"][aria-checked="true"] :global(svg) {
-    color: var(--accent);
-  }
-
   .dropdown-menu button:disabled :global(svg) {
     color: var(--disabled);
   }
@@ -5309,11 +5298,6 @@
     color: var(--subtle);
     font-size: 14px;
     font-family: inherit;
-  }
-
-  .dropdown-menu button[role="menuitemcheckbox"][aria-checked="true"] kbd {
-    color: var(--accent);
-    font-weight: 600;
   }
 
   .dropdown-menu button:disabled kbd {
@@ -5429,10 +5413,6 @@
   .dropdown-menu .muted-menu-item {
     color: var(--muted);
     font-size: 15px;
-  }
-
-  .menu-spacer {
-    flex: 0 0 16px;
   }
 
   .search-box {
@@ -6089,10 +6069,10 @@
   }
 
   .reader-content :global(.reader-table-wrap) {
-    width: 100%;
-    max-width: 100%;
     overflow-x: auto;
     margin: 1.4em 0 1.8em;
+    border: 1px solid var(--line);
+    border-radius: 8px;
     overscroll-behavior-x: contain;
   }
 
@@ -6100,20 +6080,29 @@
     width: 100%;
     border-collapse: collapse;
     font-size: 0.9em;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.5;
   }
 
   .reader-content :global(th),
   .reader-content :global(td) {
-    padding: 10px 14px;
-    border: 1px solid var(--line);
+    min-width: 6em;
+    padding: 0.55em 0.78em;
     text-align: left;
     vertical-align: top;
     word-break: normal;
   }
 
+  .reader-content :global(thead) {
+    background: var(--surface-muted);
+  }
+
   .reader-content :global(th) {
-    background: var(--code-bg);
     font-weight: 600;
+  }
+
+  .reader-content :global(tbody tr) {
+    border-top: 1px solid var(--line);
   }
 
   .reader-content :global(img) {
@@ -6983,6 +6972,13 @@
     .reader-content :global(.reader-table-wrap) {
       max-width: none;
       overflow: visible;
+      border-radius: 0;
+    }
+
+    .reader-content :global(th),
+    .reader-content :global(td) {
+      min-width: 0;
+      padding: 0.3em 0.45em;
     }
 
     .reader-content :global(.hljs-comment),

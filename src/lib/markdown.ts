@@ -21,6 +21,10 @@ type MermaidRenderer = (typeof import("mermaid"))["default"];
 
 const maxMermaidDiagrams = 10;
 const maxMermaidDiagramChars = 20_000;
+const markdownOptions = { html: false, linkify: true, typographer: false };
+const headingParser = new MarkdownIt(markdownOptions);
+const { escapeHtml } = headingParser.utils;
+
 const mermaidThemeCss = `
   svg { background: transparent; font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif; }
   .node rect, .node circle, .node ellipse, .node polygon, .node path,
@@ -111,20 +115,20 @@ function containsMathDelimiter(text: string): boolean {
   );
 }
 
+function isMathFence(token: Token): boolean {
+  return token.type === "fence" && token.info.trim().toLowerCase() === "math";
+}
+
 function hasMathContent(tokens: Token[], source: string): boolean {
-  const hasMathFence = tokens.some(
-    (token) => token.type === "fence" && token.info.trim().toLowerCase() === "math",
-  );
-  if (hasMathFence) return true;
+  if (tokens.some(isMathFence)) return true;
   if (!source.includes("$") && !source.includes("\\")) return false;
 
-  const inlineText = tokens
+  // Markdown-it 会去掉已解析文本中公式分隔符前的反斜杠
+  const inlineSource = tokens
     .filter((token) => token.type === "inline")
-    .flatMap((token) => token.children ?? [])
-    .filter((token) => token.type === "text")
     .map((token) => token.content)
     .join("\n");
-  return containsMathDelimiter(inlineText);
+  return containsMathDelimiter(inlineSource);
 }
 
 function isMermaidFence(token: Token): boolean {
@@ -197,8 +201,7 @@ function collectHeadings(tokens: Token[]): DocumentHeading[] {
 }
 
 export function extractDocumentHeadings(source: string): DocumentHeading[] {
-  const parser = new MarkdownIt({ html: false, linkify: true, typographer: false });
-  return collectHeadings(parser.parse(source, {}));
+  return collectHeadings(headingParser.parse(source, {}));
 }
 
 function replaceWithText(token: Token, text: string) {
@@ -219,11 +222,8 @@ export async function renderMarkdown(
   type Highlighter = (typeof import("highlight.js/lib/common"))["default"];
   let highlighter: Highlighter | undefined;
 
-  const escapeHtml = new MarkdownIt().utils.escapeHtml;
   const parser = new MarkdownIt({
-    html: false,
-    linkify: true,
-    typographer: false,
+    ...markdownOptions,
     highlight(code: string, language: string) {
       if (highlighter && language && highlighter.getLanguage(language)) {
         try {
@@ -236,14 +236,10 @@ export async function renderMarkdown(
     },
   }).use(taskLists, { enabled: false });
 
-  const defaultTableOpenRenderer = parser.renderer.rules.table_open;
-  const defaultTableCloseRenderer = parser.renderer.rules.table_close;
-  if (defaultTableOpenRenderer && defaultTableCloseRenderer) {
-    parser.renderer.rules.table_open = (...args) =>
-      `<div class="reader-table-wrap" role="region" aria-label="表格内容，可使用方向键横向滚动" tabindex="0">${defaultTableOpenRenderer(...args)}`;
-    parser.renderer.rules.table_close = (...args) =>
-      `${defaultTableCloseRenderer(...args)}</div>`;
-  }
+  parser.renderer.rules.table_open = (tokens, index, options, _env, self) =>
+    `<div class="reader-table-wrap" role="region" aria-label="表格内容，可使用方向键横向滚动" tabindex="0">${self.renderToken(tokens, index, options)}`;
+  parser.renderer.rules.table_close = (tokens, index, options, _env, self) =>
+    `${self.renderToken(tokens, index, options)}</div>`;
 
   let tokens = parser.parse(source, {});
   if (hasMathContent(tokens, source)) {
@@ -251,7 +247,6 @@ export async function renderMarkdown(
       const katex = await loadKatexPlugin();
       parser.use(katex, {
         delimiters: "all",
-        mathFence: true,
         throwOnError: false,
         trust: false,
         maxExpand: 500,
@@ -260,6 +255,9 @@ export async function renderMarkdown(
         logger: () => "ignore" as const,
       });
       tokens = parser.parse(source, {});
+      for (const token of tokens) {
+        if (isMathFence(token)) token.type = "math_block";
+      }
       const defaultMathBlockRenderer = parser.renderer.rules.math_block;
       if (defaultMathBlockRenderer) {
         parser.renderer.rules.math_block = (renderTokens, index, options, env, self) => {
@@ -275,16 +273,17 @@ export async function renderMarkdown(
     }
   }
 
-  const renderableMermaidCount = tokens.filter(
+  const shouldRenderMermaid = tokens.some(
     (token) => isMermaidFence(token) && token.content.length <= maxMermaidDiagramChars,
-  ).length;
-  const shouldRenderMermaid = renderableMermaidCount > 0;
+  );
   const mermaidRendererLoading = shouldRenderMermaid
     ? loadMermaidRenderer().catch(() => null)
     : Promise.resolve(null);
 
-  if (tokens.some((token) => token.type === "fence" && !isMermaidFence(token))) {
-    highlighter = (await import("highlight.js/lib/common")).default;
+  if (tokens.some((token) => token.type === "fence" && token.info.trim() && !isMermaidFence(token))) {
+    highlighter = await import("highlight.js/lib/common")
+      .then((module) => module.default)
+      .catch(() => undefined);
   }
 
   const mermaidBlocks: MermaidRenderBlock[] = [];
