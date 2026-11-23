@@ -7,6 +7,7 @@
   import { open, save } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import MarkdownEditor from "$lib/MarkdownEditor.svelte";
+  import { bindReaderTableScrollbars } from "$lib/reader-table-scroll";
   import { confirmDocumentReload } from "$lib/reload-confirmation";
   import {
     fadeTransition,
@@ -3749,6 +3750,7 @@
           bind:this={readerContent}
           style={"font-size:" + fontSize + "px"}
           use:interceptReaderLinks
+          use:bindReaderTableScrollbars={activeTab.html}
         >
           {@html activeTab.html}
         </article>
@@ -5881,7 +5883,9 @@
   }
 
   .reader-content {
-    width: min(calc(100% - 64px), 720px);
+    --reader-text-width: 720px;
+    --reader-available-width: calc(100% - 64px);
+    width: min(var(--reader-available-width), var(--reader-text-width));
     min-height: 100%;
     margin: 0 auto;
     padding: 56px 0 96px;
@@ -6173,20 +6177,20 @@
   }
 
   @media screen {
-    .reader-viewport {
-      container-type: inline-size;
+    .reader-content:has(> :global(.reader-table-block)) {
+      width: max-content;
+      min-width: min(var(--reader-available-width), var(--reader-text-width));
+      max-width: var(--reader-available-width);
     }
 
-    .reader-content > :global(.reader-table-block) {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr);
+    .reader-content:has(> :global(.reader-table-block)) > :global(:not(.reader-table-block)) {
+      max-width: var(--reader-text-width);
     }
 
     .reader-content > :global(.reader-table-block) > :global(.reader-table-wrap) {
-      justify-self: unsafe center;
-      inline-size: max-content;
-      min-inline-size: 100%;
-      max-inline-size: max(100%, calc(100cqw - 64px));
+      width: max-content;
+      min-width: min(100%, var(--reader-text-width));
+      max-width: 100%;
     }
 
     .reader-content :global(.reader-table-cell-long) {
@@ -6196,11 +6200,32 @@
     .reader-content :global(.reader-table-cell-compact) {
       white-space: nowrap;
     }
+
+    .reader-content :global(.reader-table-scrollbar) {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      height: 18px;
+      max-width: 100%;
+      margin-inline-start: 1px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      overscroll-behavior-x: contain;
+      scrollbar-color: var(--line-strong) transparent;
+      background: var(--reading-surface);
+    }
+
+    .reader-content :global(.reader-table-scrollbar > div) {
+      height: 1px;
+    }
+
+    .reader-content :global(.reader-table-block:has(> .reader-table-scrollbar:not([hidden])) > .reader-table-wrap) {
+      scrollbar-width: none;
+    }
   }
 
   .reader-content :global(.reader-table-wrap) {
-    max-height: min(32rem, 55vh);
-    overflow: auto;
+    overflow-x: auto;
     border: 1px solid var(--line);
     border-radius: 8px;
     overscroll-behavior-x: contain;
@@ -6226,9 +6251,6 @@
   }
 
   .reader-content :global(th) {
-    position: sticky;
-    top: 0;
-    z-index: 1;
     border-bottom: 1px solid var(--line);
     background: var(--surface-muted);
     font-weight: 600;
@@ -6300,7 +6322,8 @@
     color: #9ac5f0;
   }
 
-  .reader-content :global(.reader-table-wrap:focus-visible) {
+  .reader-content :global(.reader-table-wrap:focus-visible),
+  .reader-content :global(.reader-table-scrollbar:focus-visible) {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
@@ -6450,7 +6473,8 @@
     .app-shell :global(button:focus-visible),
     .app-shell :global(a:focus-visible),
     .app-shell .reader-viewport:focus-visible,
-    .reader-content :global(.reader-table-wrap:focus-visible) {
+    .reader-content :global(.reader-table-wrap:focus-visible),
+    .reader-content :global(.reader-table-scrollbar:focus-visible) {
       outline-color: HighlightText;
     }
 
@@ -6911,6 +6935,7 @@
     }
 
     .reader-content {
+      --reader-available-width: 100%;
       width: 100%;
       margin: 0;
       padding: 32px 19px 64px;
@@ -7069,13 +7094,12 @@
 
     .reader-content :global(.reader-table-wrap) {
       max-width: none;
-      max-height: none;
       overflow: visible;
       border-radius: 0;
     }
 
-    .reader-content :global(th) {
-      position: static;
+    .reader-content :global(.reader-table-scrollbar) {
+      display: none;
     }
 
     .reader-content :global(th),
