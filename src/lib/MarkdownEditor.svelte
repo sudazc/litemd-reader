@@ -1073,6 +1073,11 @@
     editorView?.focus();
   }
 
+  export function commitTableCell() {
+    const input = editorView?.dom.querySelector<HTMLTextAreaElement>(".ml-table-cell-input:focus");
+    input?.blur();
+  }
+
   export function openSearch() {
     if (!editorView || !searchPanelOpener) {
       searchRequested = true;
@@ -1557,10 +1562,13 @@
 
   :global(.editor-host .ml-editor-table) {
     /* 编辑器关闭自动换行时，表格仍以编辑区的可见宽度为准 */
-    max-width: max(12rem, calc(100cqw - 6rem));
+    --editor-table-available-width: max(12rem, calc(100cqw - 6rem));
+    width: max-content;
+    min-width: min(100%, 720px, var(--editor-table-available-width));
+    max-width: min(100%, var(--editor-table-available-width));
     padding-block: 4px;
     color: var(--text);
-    font: 15px/1.55 "Segoe UI", "Microsoft YaHei UI", sans-serif;
+    font: 16px/1.5 "Segoe UI", "Microsoft YaHei UI", sans-serif;
     white-space: normal;
   }
 
@@ -1570,160 +1578,53 @@
     margin-bottom: 6px;
   }
 
-  :global(.editor-host .ml-table-scroll) {
-    max-height: min(32rem, 54vh);
-    overflow: auto;
-    overscroll-behavior-x: contain;
-    border: 1px solid var(--line);
-    border-radius: var(--radius-control);
-    scrollbar-color: var(--line-strong) transparent;
+  :global(.editor-host .ml-editor-table [data-editable-cell]) {
+    cursor: text;
   }
 
-  :global(.editor-host .ml-table-scroll table) {
+  :global(.editor-host .ml-editor-table [data-editable-cell]:focus-within) {
+    background: var(--accent-soft);
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  :global(.editor-host .ml-table-cell-input) {
+    display: block;
     width: 100%;
-    border-spacing: 0;
-    font-variant-numeric: tabular-nums;
-  }
-
-  :global(.editor-host .ml-table-scroll th),
-  :global(.editor-host .ml-table-scroll td) {
+    min-height: 1.5em;
+    field-sizing: content;
     padding: 0;
-    vertical-align: top;
-  }
-
-  :global(.editor-host .ml-table-scroll th) {
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    border-bottom: 1px solid var(--line);
-    color: var(--text);
-    background: var(--surface-muted);
-    font-weight: 600;
-  }
-
-  :global(.editor-host .ml-table-scroll td) {
-    border-top: 1px solid var(--line);
-  }
-
-  :global(.editor-host .ml-table-scroll tr:first-child td) {
-    border-top: 0;
-  }
-
-  :global(.editor-host .ml-table-scroll :is(th, td) + :is(th, td)) {
-    border-left: 1px solid var(--line);
-  }
-
-  :global(.editor-host .ml-table-cell),
-  :global(.editor-host .ml-table-action) {
     border: 0;
+    outline: 0;
     color: inherit;
     background: transparent;
     font: inherit;
-    cursor: pointer;
-  }
-
-  :global(.editor-host .ml-table-cell) {
-    display: block;
-    width: 100%;
-    min-width: 4rem;
-    min-height: 36px;
-    padding: 7px 10px;
-    overflow-wrap: anywhere;
-    white-space: pre-wrap;
     text-align: inherit;
-  }
-
-  :global(.editor-host .ml-table-cell-long) {
-    min-width: 12rem;
-    max-width: 24rem;
-  }
-
-  :global(.editor-host .ml-table-cell-compact) {
-    white-space: nowrap;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    resize: none;
   }
 
   :global(.editor-host .ml-table-action) {
     min-height: 34px;
     padding: 4px 10px;
+    border: 0;
     border-radius: var(--radius-control);
     color: var(--muted);
+    background: transparent;
+    font: inherit;
+    cursor: pointer;
   }
 
-  :global(.editor-host .ml-table-cell:hover),
   :global(.editor-host .ml-table-action:hover) {
     color: var(--text);
     background: var(--hover);
   }
 
-  :global(.editor-host .ml-table-scroll:focus-visible),
-  :global(.editor-host .ml-table-cell:focus-visible),
+  :global(.editor-host .ml-editor-table .reader-table-wrap:focus-visible),
   :global(.editor-host .ml-table-action:focus-visible) {
     outline: 2px solid var(--accent);
     outline-offset: -2px;
-  }
-
-  :global(.editor-host .ml-table-cell-dialog) {
-    box-sizing: border-box;
-    width: min(32rem, calc(100vw - 32px));
-    padding: 20px;
-    border: 1px solid var(--line);
-    border-radius: var(--radius-dialog);
-    color: var(--text);
-    background: var(--surface);
-    box-shadow: var(--shadow-dialog);
-  }
-
-  :global(.editor-host .ml-table-cell-dialog::backdrop) {
-    background: rgb(10 14 22 / 44%);
-  }
-
-  :global(.editor-host .ml-table-cell-dialog h2) {
-    margin: 0 0 12px;
-    font-size: 18px;
-    font-weight: 600;
-  }
-
-  :global(.editor-host .ml-table-cell-dialog textarea) {
-    box-sizing: border-box;
-    width: 100%;
-    min-height: 90px;
-    padding: 8px 10px;
-    border: 1px solid var(--line-strong);
-    border-radius: var(--radius-control);
-    color: var(--text);
-    background: var(--surface);
-    font: inherit;
-    resize: vertical;
-  }
-
-  :global(.editor-host .ml-table-cell-dialog textarea:focus-visible) {
-    outline: 2px solid var(--accent);
-    outline-offset: -1px;
-  }
-
-  :global(.editor-host .ml-table-cell-dialog p) {
-    margin: 3px 0 14px;
-    color: var(--muted);
-    font-size: 14px;
-  }
-
-  :global(.editor-host .ml-table-cell-actions) {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-  }
-
-  :global(.editor-host .ml-table-apply) {
-    padding-inline: 16px;
-    color: var(--accent-foreground);
-    background: var(--accent);
-  }
-
-  :global(.editor-host .ml-table-apply:hover),
-  :global(.editor-host .ml-table-apply:focus-visible) {
-    color: var(--accent-foreground);
-    background: var(--accent-hover);
-    outline-color: var(--accent-foreground);
   }
 
   :global(.editor-host .cm-gutters) {

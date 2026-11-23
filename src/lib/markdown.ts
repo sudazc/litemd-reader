@@ -1,7 +1,8 @@
-import MarkdownIt, { type Token } from "markdown-it";
+import type { Token } from "markdown-it";
 import taskLists from "markdown-it-task-lists";
 import DOMPurify from "dompurify";
 import { cacheImageLoader } from "./image-loader";
+import { createMarkdownParser } from "./markdown-parser.js";
 
 export type DocumentHeading = {
   id: string;
@@ -21,8 +22,7 @@ type MermaidRenderer = (typeof import("mermaid"))["default"];
 
 const maxMermaidDiagrams = 10;
 const maxMermaidDiagramChars = 20_000;
-const markdownOptions = { html: false, linkify: true, typographer: false };
-const headingParser = new MarkdownIt(markdownOptions);
+const headingParser = createMarkdownParser();
 const { escapeHtml } = headingParser.utils;
 
 const mermaidThemeCss = `
@@ -222,8 +222,7 @@ export async function renderMarkdown(
   type Highlighter = (typeof import("highlight.js/lib/common"))["default"];
   let highlighter: Highlighter | undefined;
 
-  const parser = new MarkdownIt({
-    ...markdownOptions,
+  const parser = createMarkdownParser({
     highlight(code: string, language: string) {
       if (highlighter && language && highlighter.getLanguage(language)) {
         try {
@@ -235,20 +234,6 @@ export async function renderMarkdown(
       return escapeHtml(code);
     },
   }).use(taskLists, { enabled: false });
-
-  parser.renderer.rules.table_open = (tokens, index, options, _env, self) =>
-    `<div class="reader-table-block"><div class="reader-table-wrap" role="region" aria-label="表格，可使用方向键滚动" tabindex="0">${self.renderToken(tokens, index, options)}`;
-  parser.renderer.rules.table_close = (tokens, index, options, _env, self) =>
-    `${self.renderToken(tokens, index, options)}</div></div>`;
-  parser.renderer.rules.th_open = parser.renderer.rules.td_open = (tokens, index, options, _env, self) => {
-    const text = tokens[index + 1]?.children?.map((child) => child.content).join("") ?? "";
-    if (text.length > 40) {
-      tokens[index].attrJoin("class", "reader-table-cell-long");
-    } else if (text.length <= 8 || /^[\x20-\x7e]{1,24}$/.test(text)) {
-      tokens[index].attrJoin("class", "reader-table-cell-compact");
-    }
-    return self.renderToken(tokens, index, options);
-  };
 
   let tokens = parser.parse(source, {});
   if (hasMathContent(tokens, source)) {

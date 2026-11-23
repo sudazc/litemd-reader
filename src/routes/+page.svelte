@@ -6,6 +6,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { open, save } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import "$lib/markdown-table.css";
   import MarkdownEditor from "$lib/MarkdownEditor.svelte";
   import { bindReaderTableScrollbars } from "$lib/reader-table-scroll";
   import { confirmDocumentReload } from "$lib/reload-confirmation";
@@ -230,6 +231,7 @@
         scrollToLine(line: number): void;
         scrollToProgress(progress: number): void;
         focusEditor(): void;
+        commitTableCell(): void;
         openSearch(): void;
         closeSearch(): void;
         toggleSearch(): void;
@@ -1100,6 +1102,7 @@
           event.preventDefault();
           return;
         }
+        editorComponent?.commitTableCell();
         persistSession();
         persistDraftRecovery();
         const dirtyIds = tabs.filter((tab) => isDirty(tab)).map((tab) => tab.id);
@@ -1112,7 +1115,6 @@
 
     const handleSaveAsKeydownCapture = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
-      if (event.target instanceof Element && event.target.closest("dialog[open]")) return;
       const modifier = event.ctrlKey || event.metaKey;
       if (!modifier || !event.shiftKey || event.key.toLocaleLowerCase() !== "s") return;
       event.preventDefault();
@@ -1316,6 +1318,7 @@
   }
 
   async function openFiles(paths?: string[]) {
+    editorComponent?.commitTableCell();
     openMenu = null;
     try {
       const selection =
@@ -1525,6 +1528,7 @@
     const selected = tabs.find((tab) => tab.id === id);
     if (!selected) return;
 
+    if (activeTabId !== id) editorComponent?.commitTableCell();
     settingsOpen = false;
     if (selected.editing && searchOpen) closeSearch();
     if (activeTabId !== id) activeHeadingId = null;
@@ -1587,6 +1591,7 @@
   function requestCloseTabs(ids: string[]) {
     const closing = ids.filter((id) => tabs.some((tab) => tab.id === id));
     if (!closing.length) return;
+    if (activeTabId && closing.includes(activeTabId)) editorComponent?.commitTableCell();
     if (closing.some((id) => isDirty(tabs.find((tab) => tab.id === id)))) {
       showClosePrompt(closing, false);
       return;
@@ -1957,6 +1962,7 @@
   }
 
   async function saveActiveTab(saveAs = false) {
+    editorComponent?.commitTableCell();
     if (activeTabId) await saveTab(activeTabId, saveAs);
   }
 
@@ -2243,6 +2249,7 @@
   }
 
   async function toggleEditing() {
+    editorComponent?.commitTableCell();
     const tab = activeTab;
     if (!tab || tab.loading || tab.error) return;
     if (!tab.editing) {
@@ -6193,14 +6200,6 @@
       max-width: 100%;
     }
 
-    .reader-content :global(.reader-table-cell-long) {
-      min-width: 14em;
-    }
-
-    .reader-content :global(.reader-table-cell-compact) {
-      white-space: nowrap;
-    }
-
     .reader-content :global(.reader-table-scrollbar) {
       position: sticky;
       top: 0;
@@ -6222,47 +6221,6 @@
     .reader-content :global(.reader-table-block:has(> .reader-table-scrollbar:not([hidden])) > .reader-table-wrap) {
       scrollbar-width: none;
     }
-  }
-
-  .reader-content :global(.reader-table-wrap) {
-    overflow-x: auto;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    overscroll-behavior-x: contain;
-    scrollbar-color: var(--line-strong) transparent;
-  }
-
-  .reader-content :global(table) {
-    width: 100%;
-    border-spacing: 0;
-    font-size: 0.9em;
-    font-variant-numeric: tabular-nums;
-    line-height: 1.5;
-  }
-
-  .reader-content :global(th),
-  .reader-content :global(td) {
-    min-width: 6em;
-    max-width: 24em;
-    padding: 0.55em 0.78em;
-    text-align: left;
-    vertical-align: top;
-    overflow-wrap: anywhere;
-  }
-
-  .reader-content :global(th) {
-    border-bottom: 1px solid var(--line);
-    background: var(--surface-muted);
-    font-weight: 600;
-  }
-
-  .reader-content :global(tbody tr + tr td) {
-    border-top: 1px solid var(--line);
-  }
-
-  .reader-content :global(th + th),
-  .reader-content :global(td + td) {
-    border-inline-start: 1px solid var(--line);
   }
 
   .reader-content :global(img) {

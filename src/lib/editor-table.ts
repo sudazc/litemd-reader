@@ -1,172 +1,184 @@
 import { isolateHistory } from "@codemirror/commands";
-import { syntaxTree } from "@codemirror/language";
-import { StateField, type EditorState, type Range } from "@codemirror/state";
+import { StateField, type EditorState, type Line, type Range } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType, type DecorationSet } from "@codemirror/view";
-import type { SyntaxNode } from "@lezer/common";
+import DOMPurify from "dompurify";
+import { createMarkdownParser } from "./markdown-parser.js";
 
 type TableCell = {
   from: number;
   to: number;
   text: string;
-  addOpeningPipe: boolean;
-  addClosingPipe: boolean;
+  prefix: string;
+  suffix: string;
 };
 
 type EditorTable = {
   from: number;
   to: number;
   source: string;
-  alignments: Array<"left" | "center" | "right">;
   rows: TableCell[][];
+  html: string;
 };
 
+const parser = createMarkdownParser();
 const maxPreviewCells = 2500;
+parser.renderer.rules.image = (tokens, index) => parser.utils.escapeHtml(tokens[index].content);
 
-function readRow(state: EditorState, node: SyntaxNode): TableCell[] | null {
-  const rowSource = state.doc.sliceString(node.from, node.to);
-  const separators = node.getChildren("TableDelimiter").map((separator) => separator.from);
-  // 阅读器将紧接反斜杠的竖线视为转义，遇到两种解析结果可能不同的行时保留源码
-  if (separators.some((position) => position > node.from && rowSource[position - node.from - 1] === "\\")) {
-    return null;
-  }
-  const openingPipe = separators[0] === node.from + rowSource.length - rowSource.trimStart().length;
-  const lastSeparator = separators.at(-1);
-  const closingPipe = lastSeparator !== undefined && lastSeparator === node.from + rowSource.trimEnd().length - 1;
-  if (openingPipe && closingPipe && separators.length === 1) return null;
-
+function readRow(line: Line, columnCount: number): TableCell[] {
+  const text = line.text.trim();
+  const start = line.from + line.length - line.text.trimStart().length;
+  const separators = [...text.matchAll(/(?<!\\)\|/g)].map((match) => match.index);
+  const openingPipe = separators[0] === 0;
+  const closingPipe = separators.at(-1) === text.length - 1;
+  const rowEnd = start + text.length - (closingPipe ? 1 : 0);
   const ends = separators.slice(openingPipe ? 1 : 0, closingPipe ? -1 : undefined);
-  ends.push(closingPipe ? lastSeparator : node.to);
-  let from = openingPipe ? separators[0] + 1 : node.from;
+  if (!openingPipe || !closingPipe || separators.length > 1) ends.push(rowEnd - start);
+  let from = openingPipe ? 1 : 0;
 
-  return ends.map((end, index) => {
-    const raw = state.doc.sliceString(from, end);
-    const text = raw.trim();
-    // 空格占位的单元格从中间插入，保留两侧原有空白
-    const start = from + (text ? raw.length - raw.trimStart().length : Math.floor(raw.length / 2));
+  const cells = ends.slice(0, columnCount).map((end, index) => {
+    const raw = text.slice(from, end);
+    const value = raw.trim();
+    const position = start + from + (value ? raw.length - raw.trimStart().length : Math.floor(raw.length / 2));
     from = end + 1;
     return {
-      from: start,
-      to: start + text.length,
-      text,
-      addOpeningPipe: index === 0 && !openingPipe,
-      addClosingPipe: index === ends.length - 1 && !closingPipe,
+      from: position,
+      to: position + value.length,
+      text: value,
+      prefix: index === 0 && !openingPipe ? "| " : "",
+      suffix: index === ends.length - 1 && !closingPipe ? " |" : "",
     };
   });
+
+  // Markdown 表格用空格子补齐缺列，只有实际输入时才在原文中加入分隔符
+  const existingCells = cells.length;
+  for (let index = existingCells; index < columnCount; index += 1) {
+    cells.push({
+      from: rowEnd,
+      to: rowEnd,
+      text: "",
+      prefix: (closingPipe ? "| " : " | ").repeat(index - existingCells + 1),
+      suffix: closingPipe ? " " : " |",
+    });
+  }
+  return cells;
 }
 
-/** 读取可编辑的顶层表格，并保留单元格在原文中的位置 */
+/** 根据阅读器识别的表格定位单元格源码 */
 export function readEditorTables(state: EditorState): EditorTable[] {
+  const source = state.doc.toString();
+  if (!source.includes("|")) return [];
+  const env = {};
+  const tokens = parser.parse(source, env);
   const tables: EditorTable[] = [];
-  for (let node = syntaxTree(state).topNode.firstChild; node; node = node.nextSibling) {
-    if (node.name !== "Table") continue;
-    const header = node.getChild("TableHeader");
-    const separator = node.getChild("TableDelimiter");
-    if (!header || !separator) continue;
-    const rowNodes = [header, ...node.getChildren("TableRow")];
-    const columnRules = state.doc.sliceString(separator.from, separator.to)
-      .trim().replace(/^\||\|$/g, "").split("|").map((column) => column.trim());
-    if (columnRules.some((column) => !/^:?-+:?$/.test(column))) continue;
-    if (columnRules.length * rowNodes.length > maxPreviewCells) continue;
-    const rows = rowNodes.map((row) => readRow(state, row));
-    if (!rows.every((row): row is TableCell[] => row?.length === columnRules.length)) continue;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const opening = tokens[index];
+    if (opening.type !== "table_open" || opening.level !== 0 || !opening.map) continue;
+    const start = index;
+    while (index + 1 < tokens.length && tokens[index].type !== "table_close") index += 1;
+    const tableTokens = tokens.slice(start, index + 1);
+    const columns = tableTokens.filter((token) => token.type === "th_open").length;
+    const rowTokens = tableTokens.filter((token) => token.type === "tr_open");
+    if (columns === 0 || rowTokens.some((token) => !token.map) || columns * rowTokens.length > maxPreviewCells) continue;
 
-    const from = state.doc.lineAt(node.from).from;
-    const to = state.doc.lineAt(node.to).to;
+    const from = state.doc.line(opening.map[0] + 1).from;
+    const to = state.doc.line(opening.map[1]).to;
     tables.push({
       from,
       to,
       source: state.doc.sliceString(from, to),
-      rows,
-      alignments: columnRules.map((column) =>
-        column.endsWith(":") ? (column.startsWith(":") ? "center" : "right") : "left",
-      ),
+      rows: rowTokens.map((row) => readRow(state.doc.line(row.map![0] + 1), columns)),
+      html: parser.renderer.render(tableTokens, parser.options, env),
     });
   }
   return tables;
 }
 
-/** 只替换目标单元格，必要时补齐边缘分隔符 */
+/** 写回一个格子的源文并保护 Markdown 行列分隔符 */
 export function editTableCell(state: EditorState, cell: TableCell, value: string) {
   if (value === cell.text) return null;
-  let insert = value.replace(/\r\n?|\n/g, " ").trim().replace(/(\\*)\|/g, (_, slashes: string) =>
-    slashes.length % 2 === 0 ? `${slashes}\\|` : `${slashes}|`,
-  );
-  if (insert === cell.text) return null;
-  if (cell.addOpeningPipe) insert = `| ${insert}`;
-  if (cell.addClosingPipe) insert += " |";
-  else if (insert.endsWith("\\") && state.doc.sliceString(cell.to, cell.to + 1) === "|") insert += " ";
+  const content = value.replace(/\r\n?|\n/g, "<br>").trim().replace(/(?<!\\)\|/g, "\\|");
+  if (content === cell.text) return null;
+  let insert = cell.prefix + content + cell.suffix;
+  if (insert.endsWith("\\") && state.doc.sliceString(cell.to, cell.to + 1) === "|") insert += " ";
   return { from: cell.from, to: cell.to, insert };
 }
 
-function createButton(document: Document, text: string, className: string) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = className;
-  button.textContent = text;
-  return button;
+function findTable(view: EditorView, from: number) {
+  return view.contentDOM.querySelector<HTMLElement>(`[data-table-start="${from}"]`);
 }
 
-function showCellEditor(view: EditorView, table: EditorTable, cell: TableCell, trigger: HTMLButtonElement) {
-  const document = trigger.ownerDocument;
-  const initialDoc = view.state.doc;
-  const dialog = document.createElement("dialog");
-  dialog.className = "ml-table-cell-dialog";
-  dialog.setAttribute("aria-label", "编辑单元格");
+function focusCell(view: EditorView, from: number, index: number) {
+  const target = findTable(view, from)?.querySelector<HTMLElement>(`[data-editable-cell="${index}"]`);
+  if (target) target.focus();
+  else view.focus();
+}
 
-  const title = document.createElement("h2");
-  title.textContent = "编辑单元格";
-  const form = document.createElement("form");
-  const input = document.createElement("textarea");
-  input.value = cell.text;
-  input.rows = 5;
-  input.spellcheck = false;
-  input.setAttribute("aria-label", "单元格内容");
-  const hint = document.createElement("p");
-  hint.textContent = "支持 Markdown，换行会合并为空格";
-  const actions = document.createElement("div");
-  actions.className = "ml-table-cell-actions";
-  const cancel = createButton(document, "取消", "ml-table-action");
-  cancel.addEventListener("click", () => dialog.close());
-  const confirm = createButton(document, "应用", "ml-table-action ml-table-apply");
-  confirm.type = "submit";
-  actions.append(cancel, confirm);
-  form.append(input, hint, actions);
-  dialog.append(title, form);
-  dialog.addEventListener("close", () => dialog.remove(), { once: true });
-  dialog.addEventListener("contextmenu", (event) => event.stopPropagation());
-  dialog.addEventListener("keydown", (event) => {
-    event.stopPropagation();
-    if (event.isComposing || !(event.ctrlKey || event.metaKey)) return;
-    if (event.key === "Enter") {
-      event.preventDefault();
-      form.requestSubmit();
-    } else if (event.key.toLowerCase() === "s") {
-      event.preventDefault();
-    }
+function appendRow(view: EditorView, from: number) {
+  const table = view.state.field(editorTables).tables.find((candidate) => candidate.from === from);
+  if (!table) return;
+  const columns = table.rows[0].length;
+  view.dispatch({
+    changes: { from: table.to, insert: `${view.state.lineBreak}|${"   |".repeat(columns)}` },
+    userEvent: "input.table",
+    annotations: isolateHistory.of("full"),
   });
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    if (initialDoc !== view.state.doc) {
-      input.setCustomValidity("表格已更新，请取消后重新打开单元格");
-      input.reportValidity();
+}
+
+function beginCellEdit(view: EditorView, table: EditorTable, field: HTMLElement, index: number) {
+  if (field.querySelector("textarea")) return;
+  const columns = table.rows[0].length;
+  const row = Math.floor(index / columns);
+  const column = index % columns;
+  const cell = table.rows[row][column];
+  const preview = [...field.childNodes];
+  const initialDoc = view.state.doc;
+  const input = field.ownerDocument.createElement("textarea");
+  input.className = "ml-table-cell-input";
+  input.setAttribute("aria-label", `表格第 ${row + 1} 行第 ${column + 1} 列`);
+  input.rows = 1;
+  input.spellcheck = false;
+  input.value = cell.text;
+  let finished = false;
+
+  function finish(save: boolean) {
+    if (finished) return;
+    finished = true;
+    const scrollLeft = field.closest(".reader-table-wrap")?.scrollLeft ?? 0;
+    field.replaceChildren(...preview);
+    const change = save && view.state.doc === initialDoc ? editTableCell(view.state, cell, input.value) : null;
+    if (change) {
+      view.dispatch({ changes: change, userEvent: "input.table", annotations: isolateHistory.of("full") });
+      findTable(view, table.from)?.querySelector(".reader-table-wrap")?.scrollTo({ left: scrollLeft });
+    }
+    view.requestMeasure();
+  }
+
+  input.addEventListener("input", () => view.requestMeasure());
+  input.addEventListener("blur", () => finish(true), { once: true });
+  input.addEventListener("keydown", (event) => {
+    if (event.isComposing) return;
+    if (event.ctrlKey || event.metaKey) {
+      if (["s", "w", "tab", "f", "p", "o", "n"].includes(event.key.toLowerCase())) input.blur();
       return;
     }
-    const change = editTableCell(view.state, cell, input.value);
-    const scroll = trigger.closest(".ml-table-scroll");
-    const scrollLeft = scroll?.scrollLeft ?? 0;
-    const scrollTop = scroll?.scrollTop ?? 0;
-    dialog.close();
-    if (!change) return;
-
-    view.dispatch({ changes: change, userEvent: "input.table", annotations: isolateHistory.of("full") });
-    const updated = view.dom.querySelector<HTMLElement>(`[data-table-start="${table.from}"] .ml-table-scroll`);
-    updated?.scrollTo({ left: scrollLeft, top: scrollTop });
-    view.focus();
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      finish(false);
+      view.focus();
+    } else if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
+      event.preventDefault();
+      const target = index + (event.key === "Tab" ? (event.shiftKey ? -1 : 1) : columns);
+      finish(true);
+      if (event.key === "Tab" && target === columns * table.rows.length) appendRow(view, table.from);
+      focusCell(view, table.from, target);
+    }
   });
 
-  trigger.closest(".ml-editor-table")?.append(dialog);
-  dialog.showModal();
-  input.focus();
+  field.replaceChildren(input);
+  input.focus({ preventScroll: true });
+  input.setSelectionRange(input.value.length, input.value.length);
+  view.requestMeasure();
 }
 
 class TableWidget extends WidgetType {
@@ -180,8 +192,8 @@ class TableWidget extends WidgetType {
   }
 
   eq(other: TableWidget) {
-    return this.sourceVisible === other.sourceVisible &&
-      this.table.from === other.table.from && this.table.source === other.table.source;
+    return this.sourceVisible === other.sourceVisible && this.table.from === other.table.from &&
+      this.table.source === other.table.source && this.table.html === other.table.html;
   }
 
   toDOM(view: EditorView) {
@@ -192,8 +204,13 @@ class TableWidget extends WidgetType {
     root.dataset.tableStart = String(table.from);
     const toolbar = document.createElement("div");
     toolbar.className = "ml-table-toolbar";
-    const toggle = createButton(document, sourceVisible ? "表格视图" : "编辑源码", "ml-table-action");
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "ml-table-action";
+    toggle.textContent = sourceVisible ? "表格视图" : "编辑源码";
+    toggle.addEventListener("mousedown", (event) => event.preventDefault());
     toggle.addEventListener("click", () => {
+      root.querySelector("textarea")?.blur();
       view.dispatch({ selection: { anchor: table.from + (sourceVisible ? 0 : 1) }, scrollIntoView: true });
       view.focus();
     });
@@ -201,33 +218,22 @@ class TableWidget extends WidgetType {
     root.append(toolbar);
     if (sourceVisible) return root;
 
-    const scroll = document.createElement("div");
-    scroll.className = "ml-table-scroll";
-    scroll.tabIndex = 0;
-    scroll.setAttribute("role", "region");
-    scroll.setAttribute("aria-label", "可横向滚动的 Markdown 表格");
-    const grid = document.createElement("table");
-    const header = grid.createTHead();
-    const body = grid.createTBody();
-    for (const [rowIndex, cells] of table.rows.entries()) {
-      const row = (rowIndex === 0 ? header : body).insertRow();
-      for (const [column, cell] of cells.entries()) {
-        const field = document.createElement(rowIndex === 0 ? "th" : "td");
-        if (rowIndex === 0) field.setAttribute("scope", "col");
-        field.style.textAlign = table.alignments[column];
-        const button = createButton(document, cell.text.replace(/\\\|/g, "|"), "ml-table-cell");
-        if (cell.text.length > 40) button.classList.add("ml-table-cell-long");
-        else if (cell.text.length <= 8 || /^[\x20-\x7e]{1,24}$/.test(cell.text)) {
-          button.classList.add("ml-table-cell-compact");
-        }
-        if (!cell.text) button.setAttribute("aria-label", "编辑空单元格");
-        button.addEventListener("click", () => showCellEditor(view, table, cell, button));
-        field.append(button);
-        row.append(field);
-      }
+    const preview = DOMPurify.sanitize(table.html, { RETURN_DOM_FRAGMENT: true, USE_PROFILES: { html: true } });
+    root.append(preview);
+    for (const link of root.querySelectorAll("table a")) link.removeAttribute("href");
+    for (const [index, cell] of [...root.querySelectorAll<HTMLElement>("th, td")].entries()) {
+      cell.dataset.editableCell = String(index);
+      cell.tabIndex = 0;
+      cell.addEventListener("focus", () => beginCellEdit(view, table, cell, index));
     }
-    scroll.append(grid);
-    root.append(scroll);
+    root.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || !(event.target instanceof Element) || event.target.closest("textarea")) return;
+      const cell = event.target.closest<HTMLElement>("[data-editable-cell]");
+      if (!cell) return;
+      event.preventDefault();
+      root.querySelector("textarea")?.blur();
+      focusCell(view, table.from, Number(cell.dataset.editableCell));
+    });
     root.addEventListener("contextmenu", (event) => event.stopPropagation());
     return root;
   }
@@ -251,11 +257,9 @@ export const editorTables = StateField.define<{ tables: EditorTable[]; decoratio
     return { tables, decorations: tableDecorations(state, tables) };
   },
   update(previous, transaction) {
-    const state = transaction.state;
-    const parsed = transaction.docChanged || syntaxTree(state) !== syntaxTree(transaction.startState);
-    if (!parsed && !transaction.selection) return previous;
-    const tables = parsed ? readEditorTables(state) : previous.tables;
-    return { tables, decorations: tableDecorations(state, tables) };
+    if (!transaction.docChanged && !transaction.selection) return previous;
+    const tables = transaction.docChanged ? readEditorTables(transaction.state) : previous.tables;
+    return { tables, decorations: tableDecorations(transaction.state, tables) };
   },
   provide: (field) => EditorView.decorations.from(field, (value) => value.decorations),
 });

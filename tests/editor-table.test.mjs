@@ -12,7 +12,8 @@ test("reads column alignment, empty cells, and escaped pipes without including s
   const [table] = readEditorTables(state);
 
   assert.equal(table.source, source);
-  assert.deepEqual(table.alignments, ["left", "center", "right"]);
+  assert.deepEqual([...table.html.matchAll(/<th[^>]+style="text-align:(\w+)"/g)].map((match) => match[1]),
+    ["left", "center", "right"]);
   assert.deepEqual(table.rows.map((row) => row.map((cell) => cell.text)), [
     ["左", "中", "右"],
     ["", "A\\|B", "C"],
@@ -27,7 +28,7 @@ test("replaces only the selected cell and keeps pasted pipes and line breaks ins
   assert.ok(change);
 
   const updated = state.update({ changes: change }).state;
-  assert.equal(updated.doc.toString(), "| 左 | 右 |\n| --- | --- |\n|  更新\\|说明 续写  | 保留 |\n\n正文");
+  assert.equal(updated.doc.toString(), "| 左 | 右 |\n| --- | --- |\n|  更新\\|说明<br>续写  | 保留 |\n\n正文");
   assert.equal(readEditorTables(updated)[0].rows[1].length, 2);
   assert.equal(editTableCell(state, cell, "原值"), null);
 });
@@ -45,12 +46,38 @@ test("clearing a cell at the edge of a row keeps the table columns intact", () =
   assert.deepEqual(readEditorTables(final)[0].rows[1].map((cell) => cell.text), ["", ""]);
 });
 
-test("leaves code blocks, nested tables, and uneven rows in the source editor", () => {
+test("leaves code blocks and nested tables in the source editor", () => {
   const state = editorState([
     "```markdown\n| a | b |\n| --- | --- |\n| c | d |\n```",
     "> | a | b |\n> | --- | --- |\n> | c | d |",
-    "| a | b |\n| --- | --- |\n| c |",
   ].join("\n\n"));
 
   assert.deepEqual(readEditorTables(state), []);
+});
+
+test("previews formatted cells, explicit line breaks, and links defined elsewhere in the document", () => {
+  const state = editorState("| 左 | 右 |\n| --- | --- |\n| **粗体**<br>下一行 | [链接][ref] `A\\|B` |\n\n[ref]: https://example.com");
+  const [table] = readEditorTables(state);
+
+  assert.match(table.html, /<strong>粗体<\/strong><br[^>]*>\s*下一行/);
+  assert.match(table.html, /<a href="https:\/\/example.com">链接<\/a> <code>A\|B<\/code>/);
+});
+
+test("keeps line break tags literal when they are escaped or inside inline code", () => {
+  const state = editorState("| 名称 | 内容 |\n| --- | --- |\n| `x<br>y` | \\<br> 和 <span>文本</span> |");
+  const [table] = readEditorTables(state);
+
+  assert.match(table.html, /<code>x&lt;br&gt;y<\/code>/);
+  assert.ok(table.html.includes("&lt;br&gt; 和 &lt;span&gt;文本&lt;/span&gt;"));
+  assert.doesNotMatch(table.html, /<br\b/);
+});
+
+test("fills a missing cell without touching extra columns or unrelated Markdown", () => {
+  const state = editorState("| 左 | 右 |\n| --- | --- |\n| 甲 |\n| 乙 | 丙 | 原文保留 |\n\n正文");
+  const [table] = readEditorTables(state);
+  assert.deepEqual(table.rows.map((row) => row.map((cell) => cell.text)), [["左", "右"], ["甲", ""], ["乙", "丙"]]);
+  const change = editTableCell(state, table.rows[1][1], "填入");
+  assert.ok(change);
+  assert.equal(state.update({ changes: change }).newDoc.toString(),
+    "| 左 | 右 |\n| --- | --- |\n| 甲 | 填入 |\n| 乙 | 丙 | 原文保留 |\n\n正文");
 });
