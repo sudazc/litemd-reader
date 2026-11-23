@@ -3335,14 +3335,14 @@
           <div class="document-navigation-actions" role="group" aria-label="文档导航">
             <div class="menu-wrap search-menu-wrap">
               <button
-                class="tool-button tool-button-label"
+                class="tool-button"
                 aria-label="查找当前文档"
                 title="查找当前文档 (Ctrl+F)"
                 aria-expanded={activeTab.editing ? undefined : searchOpen}
                 aria-controls={searchOpen && !activeTab.editing ? "reader-search-popover" : undefined}
                 onclick={() => { if (activeTab?.editing) editorComponent?.toggleSearch(); else toggleReaderSearch(); }}
               >
-                <Search size={18} /><span>查找</span>
+                <Search size={16} aria-hidden="true" />
               </button>
               {#if searchOpen && !activeTab.editing}
                 <div
@@ -3380,18 +3380,18 @@
               {/if}
             </div>
             <button
-              class="tool-button tool-button-label"
+              class="tool-button"
               aria-label="文档目录"
               title={tocVisible ? "隐藏目录" : "显示目录"}
               aria-pressed={tocVisible}
               onclick={toggleOutlinePanel}
             >
-              {#if tocVisible}<PanelLeftClose size={18} />{:else}<PanelLeftOpen size={18} />{/if}<span>目录</span>
+              {#if tocVisible}<PanelLeftClose size={16} aria-hidden="true" />{:else}<PanelLeftOpen size={16} aria-hidden="true" />{/if}
             </button>
           </div>
           <span class="document-controls-divider" aria-hidden="true"></span>
           <button
-            class="tool-button window-mode-toggle"
+            class="tool-button"
             aria-label={activeTab.editing ? "切换到阅读模式（当前为编辑）" : "切换到编辑模式（当前为阅读）"}
             title={activeTab.editing ? "切换到阅读" : "切换到编辑"}
             aria-pressed={activeTab.editing}
@@ -4851,10 +4851,11 @@
     background: var(--hover);
   }
 
-  .tool-button[aria-pressed="true"]:not(:disabled) {
-    --button-pressed-bg: var(--accent-soft);
+  .tool-button[aria-pressed="true"]:not(:disabled),
+  .tool-button[aria-expanded="true"]:not(:disabled) {
+    --button-pressed-bg: var(--selected-bg);
     color: var(--accent);
-    background: var(--accent-soft);
+    background: var(--selected-bg);
   }
 
   .tab-drag-space {
@@ -5017,14 +5018,6 @@
     gap: 4px;
   }
 
-  .document-controls .tool-button {
-    height: 36px;
-  }
-
-  .document-controls .window-mode-toggle {
-    width: 36px;
-  }
-
   .document-controls-divider {
     flex: 0 0 1px;
     width: 1px;
@@ -5035,38 +5028,9 @@
   }
 
   .tool-button {
-    width: 32px;
+    width: 36px;
+    height: 36px;
     padding: 0;
-  }
-
-  .tool-button-label {
-    width: auto;
-    min-width: 32px;
-    gap: 7px;
-    padding: 0 9px;
-    font-size: 14px;
-  }
-
-  .tool-button-label[aria-pressed="true"] {
-    color: var(--accent);
-    background: var(--selected-bg);
-  }
-
-  .tool-button-label[aria-pressed="true"]:not(:disabled) {
-    --button-pressed-bg: var(--selected-bg);
-  }
-
-  .tool-button-label[aria-expanded="true"] {
-    color: var(--accent);
-    background: var(--selected-bg);
-  }
-
-  .tool-button-label[aria-expanded="true"]:not(:disabled) {
-    --button-pressed-bg: var(--selected-bg);
-  }
-
-  .tool-button-label span {
-    white-space: nowrap;
   }
 
   .app-shell .settings-nav button:focus-visible,
@@ -6454,6 +6418,7 @@
     .app-shell .settings-nav button.active,
     .app-shell .settings-segmented button.active,
     .app-shell .tool-button[aria-pressed="true"],
+    .app-shell .tool-button[aria-expanded="true"],
     .app-shell .titlebar-action[aria-pressed="true"],
     .app-shell .menu-trigger[aria-expanded="true"],
     .app-shell .outline-item.current {
@@ -6803,18 +6768,6 @@
     z-index: 120;
   }
 
-  @media (max-width: 1119px) {
-    .document-controls .tool-button-label {
-      width: 36px;
-      min-width: 36px;
-      padding: 0;
-    }
-
-    .document-controls .tool-button-label span {
-      display: none;
-    }
-  }
-
   @media (max-width: 820px) {
     .window-controls button {
       width: 40px;
@@ -6883,12 +6836,6 @@
       flex-basis: 34px;
     }
 
-    .document-controls .tool-button-label,
-    .document-controls .window-mode-toggle {
-      width: 32px;
-      min-width: 32px;
-    }
-
     .document-controls-divider {
       margin-inline: 1px;
     }
@@ -6929,14 +6876,6 @@
       margin: 0;
       padding: 32px 19px 64px;
     }
-
-    .tool-button-label {
-      width: 32px;
-      min-width: 32px;
-      padding: 0;
-    }
-
-    .tool-button-label span { display: none; }
 
     .settings-workspace-header { flex-basis: 56px; padding: 0 20px; }
     .settings-panel-content { padding: 20px; }
