@@ -6168,17 +6168,48 @@
     color: var(--code-title);
   }
 
-  .reader-content :global(.reader-table-wrap) {
-    overflow-x: auto;
+  .reader-content :global(.reader-table-block) {
     margin: 1.4em 0 1.8em;
+  }
+
+  @media screen {
+    .reader-viewport {
+      container-type: inline-size;
+    }
+
+    .reader-content > :global(.reader-table-block) {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .reader-content > :global(.reader-table-block) > :global(.reader-table-wrap) {
+      justify-self: unsafe center;
+      inline-size: max-content;
+      min-inline-size: 100%;
+      max-inline-size: max(100%, calc(100cqw - 64px));
+    }
+
+    .reader-content :global(.reader-table-cell-long) {
+      min-width: 14em;
+    }
+
+    .reader-content :global(.reader-table-cell-compact) {
+      white-space: nowrap;
+    }
+  }
+
+  .reader-content :global(.reader-table-wrap) {
+    max-height: min(32rem, 55vh);
+    overflow: auto;
     border: 1px solid var(--line);
     border-radius: 8px;
     overscroll-behavior-x: contain;
+    scrollbar-color: var(--line-strong) transparent;
   }
 
   .reader-content :global(table) {
     width: 100%;
-    border-collapse: collapse;
+    border-spacing: 0;
     font-size: 0.9em;
     font-variant-numeric: tabular-nums;
     line-height: 1.5;
@@ -6187,22 +6218,29 @@
   .reader-content :global(th),
   .reader-content :global(td) {
     min-width: 6em;
+    max-width: 24em;
     padding: 0.55em 0.78em;
     text-align: left;
     vertical-align: top;
-    word-break: normal;
-  }
-
-  .reader-content :global(thead) {
-    background: var(--surface-muted);
+    overflow-wrap: anywhere;
   }
 
   .reader-content :global(th) {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface-muted);
     font-weight: 600;
   }
 
-  .reader-content :global(tbody tr) {
+  .reader-content :global(tbody tr + tr td) {
     border-top: 1px solid var(--line);
+  }
+
+  .reader-content :global(th + th),
+  .reader-content :global(td + td) {
+    border-inline-start: 1px solid var(--line);
   }
 
   .reader-content :global(img) {
@@ -7031,13 +7069,19 @@
 
     .reader-content :global(.reader-table-wrap) {
       max-width: none;
+      max-height: none;
       overflow: visible;
       border-radius: 0;
+    }
+
+    .reader-content :global(th) {
+      position: static;
     }
 
     .reader-content :global(th),
     .reader-content :global(td) {
       min-width: 0;
+      max-width: none;
       padding: 0.3em 0.45em;
     }
 
