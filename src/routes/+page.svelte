@@ -1111,6 +1111,7 @@
 
     const handleSaveAsKeydownCapture = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
+      if (event.target instanceof Element && event.target.closest("dialog[open]")) return;
       const modifier = event.ctrlKey || event.metaKey;
       if (!modifier || !event.shiftKey || event.key.toLocaleLowerCase() !== "s") return;
       event.preventDefault();
