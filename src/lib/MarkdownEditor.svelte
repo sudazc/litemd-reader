@@ -69,7 +69,6 @@
     editorCompartments: EditorCompartments | null;
     cursor: number;
     editorScrollProgress: number;
-    lineEnding: string;
     onCursorChange: (cursor: number, line: number) => void;
     onScrollPositionChange: (scrollTop: number, progress: number) => void;
     onSave: (saveAs: boolean) => void;
@@ -90,7 +89,6 @@
     editorCompartments,
     cursor,
     editorScrollProgress,
-    lineEnding,
     onCursorChange,
     onScrollPositionChange,
     onSave,
@@ -455,7 +453,7 @@
         const clipboardText = await navigator.clipboard.readText();
         if (clipboardText) {
           const { from, to } = view.state.selection.main;
-          const text = clipboardText.replace(/\r\n?/g, "\n");
+          const text = view.state.toText(clipboardText);
           view.dispatch({
             changes: { from, to, insert: text },
             selection: { anchor: from + text.length },
@@ -850,7 +848,6 @@
             language.indentUnit.of(" ".repeat(indentWidth)),
             state.EditorState.tabSize.of(indentWidth),
           ]),
-          state.EditorState.lineSeparator.of(lineEnding),
           view.EditorView.updateListener.of((update) => {
             if (
               update.docChanged ||
@@ -875,12 +872,14 @@
           }),
         ];
 
+        // 编辑器坐标与 Markdown 行映射共用标准换行，保存文件时恢复换行格式
+        const initialDoc = editorState?.doc ?? state.Text.of(value.split(/\r\n?|\n/));
         editorView = new view.EditorView({
           state:
             editorState ??
             state.EditorState.create({
-              doc: value,
-              selection: { anchor: Math.min(cursor, value.length) },
+              doc: initialDoc,
+              selection: { anchor: Math.min(cursor, initialDoc.length) },
               extensions,
             }),
           parent: host,

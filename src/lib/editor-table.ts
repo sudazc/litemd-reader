@@ -2,12 +2,14 @@ import { isolateHistory } from "@codemirror/commands";
 import { StateField, type EditorState, type Line, type Range } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType, type DecorationSet } from "@codemirror/view";
 import DOMPurify from "dompurify";
+import type { Token } from "markdown-it";
 import { createMarkdownParser } from "./markdown-parser.js";
 
 type TableCell = {
   from: number;
   to: number;
   text: string;
+  inputText: string;
   prefix: string;
   suffix: string;
 };
@@ -24,7 +26,26 @@ const parser = createMarkdownParser();
 const maxPreviewCells = 2500;
 parser.renderer.rules.image = (tokens, index) => parser.utils.escapeHtml(tokens[index].content);
 
-function readRow(line: Line, columnCount: number): TableCell[] {
+function readCellInputText(source: string, children: Token[]) {
+  if (!source.includes("<")) return source;
+
+  // 表格解析会移除竖线前的转义斜杠，将换行标签的位置映射回原文
+  const pipeEscapes = [...source.matchAll(/\\(?=\|)/g)].map((match) => match.index);
+  let offset = 0;
+  let previous = 0;
+  let input = "";
+  for (const token of children) {
+    const tag = token.meta?.lineBreakTag as { from: number; to: number } | undefined;
+    if (!tag) continue;
+    while (offset < pipeEscapes.length && pipeEscapes[offset] - offset < tag.from) offset += 1;
+    input += source.slice(previous, tag.from + offset) + "\n";
+    previous = tag.to + offset;
+  }
+  return input + source.slice(previous);
+}
+
+function readRow(line: Line, cellTokens: Token[]): TableCell[] {
+  const columnCount = cellTokens.length;
   const text = line.text.trim();
   const start = line.from + line.length - line.text.trimStart().length;
   const separators = [...text.matchAll(/(?<!\\)\|/g)].map((match) => match.index);
@@ -44,6 +65,7 @@ function readRow(line: Line, columnCount: number): TableCell[] {
       from: position,
       to: position + value.length,
       text: value,
+      inputText: readCellInputText(value, cellTokens[index].children ?? []),
       prefix: index === 0 && !openingPipe ? "| " : "",
       suffix: index === ends.length - 1 && !closingPipe ? " |" : "",
     };
@@ -56,6 +78,7 @@ function readRow(line: Line, columnCount: number): TableCell[] {
       from: rowEnd,
       to: rowEnd,
       text: "",
+      inputText: "",
       prefix: (closingPipe ? "| " : " | ").repeat(index - existingCells + 1),
       suffix: closingPipe ? " " : " |",
     });
@@ -80,13 +103,19 @@ export function readEditorTables(state: EditorState): EditorTable[] {
     const rowTokens = tableTokens.filter((token) => token.type === "tr_open");
     if (columns === 0 || rowTokens.some((token) => !token.map) || columns * rowTokens.length > maxPreviewCells) continue;
 
+    const cellTokens = tableTokens.filter((token) => token.type === "inline");
     const from = state.doc.line(opening.map[0] + 1).from;
     const to = state.doc.line(opening.map[1]).to;
+    const rows = rowTokens.map((row, rowIndex) => {
+      const line = state.doc.line(row.map![0] + 1);
+      const firstCell = rowIndex * columns;
+      return readRow(line, cellTokens.slice(firstCell, firstCell + columns));
+    });
     tables.push({
       from,
       to,
       source: state.doc.sliceString(from, to),
-      rows: rowTokens.map((row) => readRow(state.doc.line(row.map![0] + 1), columns)),
+      rows,
       html: parser.renderer.render(tableTokens, parser.options, env),
     });
   }
@@ -95,7 +124,7 @@ export function readEditorTables(state: EditorState): EditorTable[] {
 
 /** 写回一个格子的源文并保护 Markdown 行列分隔符 */
 export function editTableCell(state: EditorState, cell: TableCell, value: string) {
-  if (value === cell.text) return null;
+  if (value === cell.inputText) return null;
   const content = value.replace(/\r\n?|\n/g, "<br>").trim().replace(/(?<!\\)\|/g, "\\|");
   if (content === cell.text) return null;
   let insert = cell.prefix + content + cell.suffix;
@@ -137,7 +166,7 @@ function beginCellEdit(view: EditorView, table: EditorTable, field: HTMLElement,
   input.setAttribute("aria-label", `表格第 ${row + 1} 行第 ${column + 1} 列`);
   input.rows = 1;
   input.spellcheck = false;
-  input.value = cell.text;
+  input.value = cell.inputText;
   let finished = false;
 
   function finish(save: boolean) {

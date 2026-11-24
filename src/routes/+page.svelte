@@ -218,6 +218,7 @@
   let closePromptReturnFocus: HTMLElement | null = null;
   let confirmationDialog = $state<HTMLElement>();
   let allowConfirmedWindowClose = false;
+  let windowClosePending = false;
   let closePromptGeneration = 0;
   let startupOpenReady = $state(false);
   let nativeOpenSignaled = $state(false);
@@ -243,6 +244,7 @@
   let hasTabOverflow = $state(false);
   let readerViewport = $state<HTMLDivElement>();
   let readerContent = $state<HTMLElement>();
+  let outlineList = $state<HTMLElement>();
   let outlineResizeBounds: { left: number; splitterWidth: number } | null = null;
   let searchInput = $state<HTMLInputElement>();
   let settingsWorkspace = $state<HTMLElement>();
@@ -906,21 +908,20 @@
 
     try {
       const markdown = await loadMarkdownModule();
-      await Promise.all(restoredTabs.map(async (tab) => {
-        const source = tab.source;
-        const rendered = await markdown.renderMarkdown(
-          source,
-          loadDocumentImage(tab.path),
-        );
-        if (sourceForTab(tab) !== source) return;
+      await Promise.all(restoredTabs.map(async ({ editorInstanceId }) => {
+        const tab = tabs.find((candidate) => candidate.editorInstanceId === editorInstanceId);
+        if (!tab) return;
+        const source = sourceForTab(tab);
+        const path = tab.path;
+        const rendered = await markdown.renderMarkdown(source, loadDocumentImage(path));
+        if (!tabs.includes(tab) || tab.path !== path || sourceForTab(tab) !== source) return;
         tab.html = rendered.html;
         tab.headings = rendered.headings;
         tab.renderedSource = source;
-        tab.renderedPath = tab.path;
+        tab.renderedPath = path;
       }));
       showNotice(`已恢复 ${restoredTabs.length} 份未保存文档`);
     } catch {
-      restoredTabs.forEach((tab) => (tab.editing = true));
       showNotice("未保存文档已恢复，阅读内容暂时无法生成。");
     }
   }
@@ -1088,9 +1089,13 @@
         }
         if (markdownPaths.length) void openFiles(markdownPaths);
       }).then((unlisten) => unlistenNativeEvents.push(unlisten));
-      void currentWindow.onCloseRequested((event) => {
+      void currentWindow.onCloseRequested(async (event) => {
         if (allowConfirmedWindowClose) {
           allowConfirmedWindowClose = false;
+          return;
+        }
+        if (windowClosePending) {
+          event.preventDefault();
           return;
         }
         if (pendingConfirmation) {
@@ -1102,13 +1107,23 @@
           event.preventDefault();
           return;
         }
-        editorComponent?.commitTableCell();
-        persistSession();
-        persistDraftRecovery();
-        const dirtyIds = tabs.filter((tab) => isDirty(tab)).map((tab) => tab.id);
-        if (!dirtyIds.length) return;
-        event.preventDefault();
-        showClosePrompt(dirtyIds, true);
+        windowClosePending = true;
+        try {
+          const saved = await waitForPendingSaves(() => tabs);
+          if (!saved || pendingConfirmation || pendingCloseIds.length) {
+            event.preventDefault();
+            return;
+          }
+          editorComponent?.commitTableCell();
+          persistSession();
+          persistDraftRecovery();
+          const dirtyIds = tabs.filter(isDirty).map((tab) => tab.id);
+          if (!dirtyIds.length) return;
+          event.preventDefault();
+          showClosePrompt(dirtyIds, true);
+        } finally {
+          windowClosePending = false;
+        }
       }).then((unlisten) => unlistenNativeEvents.push(unlisten));
       externalCheckTimer = setInterval(() => void checkOpenFiles(), 2500);
     }
@@ -1547,7 +1562,7 @@
   }
 
   function closeTab(id: string) {
-    requestCloseTabs([id]);
+    void requestCloseTabs([id]);
   }
 
   function createLoadingTab(
@@ -1588,15 +1603,32 @@
     };
   }
 
-  function requestCloseTabs(ids: string[]) {
-    const closing = ids.filter((id) => tabs.some((tab) => tab.id === id));
+  async function waitForPendingSaves(closingTabs: () => ReaderTab[]): Promise<boolean> {
+    while (true) {
+      const pending = closingTabs()
+        .map((tab) => saveOperations.get(tab))
+        .filter((operation): operation is Promise<boolean> => operation !== undefined);
+      if (!pending.length) return true;
+      const results = await Promise.allSettled(pending);
+      if (results.some((result) => result.status === "rejected" || !result.value)) return false;
+    }
+  }
+
+  async function requestCloseTabs(ids: string[]) {
+    if (windowClosePending || documentInteractionBlocked) return;
+    const requestedTabs = tabs.filter((tab) => ids.includes(tab.id));
+    const closingTabs = () => requestedTabs.filter((tab) => tabs.includes(tab));
+    const saved = await waitForPendingSaves(closingTabs);
+    if (!saved || windowClosePending || documentInteractionBlocked) return;
+    const closing = closingTabs();
     if (!closing.length) return;
-    if (activeTabId && closing.includes(activeTabId)) editorComponent?.commitTableCell();
-    if (closing.some((id) => isDirty(tabs.find((tab) => tab.id === id)))) {
-      showClosePrompt(closing, false);
+    if (activeTab && closing.includes(activeTab)) editorComponent?.commitTableCell();
+    const closingIds = closing.map((tab) => tab.id);
+    if (closing.some(isDirty)) {
+      showClosePrompt(closingIds, false);
       return;
     }
-    performCloseTabs(closing);
+    performCloseTabs(closingIds);
   }
 
   function requestConfirmation(request: ConfirmationRequest): Promise<boolean> {
@@ -1973,7 +2005,6 @@
   ): Promise<boolean> {
     const tab = tabs.find((item) => item.id === tabId);
     if (!tab || tab.loading || tab.error) return false;
-    if (!saveAs && tab.path && !isDirty(tab)) return true;
 
     const pendingSave = saveOperations.get(tab);
     if (pendingSave) {
@@ -1991,6 +2022,7 @@
       }
       return true;
     }
+    if (!saveAs && tab.path && !isDirty(tab)) return true;
 
     const operation = saveTabOperation(tabId, saveAs, forcedEncoding);
     saveOperations.set(tab, operation);
@@ -2346,6 +2378,41 @@
     readerViewport;
     return clearReaderHeadingScroll;
   });
+
+  $effect(() => {
+    if (tocVisible && activeTab?.headings.length && activeHeadingId && outlineList) {
+      const current = outlineList.querySelector<HTMLElement>('[aria-current="location"]');
+      if (current) revealOutlineItem(outlineList, current);
+    }
+  });
+
+  function revealOutlineItem(list: HTMLElement, item: HTMLElement) {
+    const top = list.getBoundingClientRect().top + list.clientTop;
+    const itemBounds = item.getBoundingClientRect();
+    const focusClearance = 6;
+    const above = itemBounds.top - (top + focusClearance);
+    const below = itemBounds.bottom - (top + list.clientHeight - focusClearance);
+    if (above < 0) list.scrollTop += above;
+    else if (below > 0) list.scrollTop += below;
+  }
+
+  function handleOutlineKeydown(event: KeyboardEvent & { currentTarget: HTMLButtonElement }) {
+    const current = event.currentTarget;
+    const list = current.parentElement;
+    if (!list || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    const targets: Record<string, Element | null> = {
+      ArrowUp: current.previousElementSibling,
+      ArrowDown: current.nextElementSibling,
+      Home: list.firstElementChild,
+      End: list.lastElementChild,
+    };
+    const target = targets[event.key];
+    if (target === undefined) return;
+    event.preventDefault();
+    if (!(target instanceof HTMLButtonElement)) return;
+    target.focus({ preventScroll: true });
+    revealOutlineItem(list, target);
+  }
 
   function scheduleReaderHeadingSync() {
     if (readerHeadingSyncTimer) clearTimeout(readerHeadingSyncTimer);
@@ -3619,7 +3686,7 @@
       onkeydown={handleMenuKeydown}
     >
       <button role="menuitem" onclick={() => { const id = tabContextMenu?.tabId; tabContextMenu = null; if (id) closeTab(id); }}><X size={16} /><span>关闭标签</span></button>
-      <button role="menuitem" onclick={() => { const id = tabContextMenu?.tabId; tabContextMenu = null; if (id) requestCloseTabs(tabs.filter((tab) => tab.id !== id).map((tab) => tab.id)); }}><X size={16} /><span>关闭其他标签</span></button>
+      <button role="menuitem" onclick={() => { const id = tabContextMenu?.tabId; tabContextMenu = null; if (id) void requestCloseTabs(tabs.filter((tab) => tab.id !== id).map((tab) => tab.id)); }}><X size={16} /><span>关闭其他标签</span></button>
       {#if tabs.find((tab) => tab.id === tabContextMenu?.tabId)?.path}
         <div class="menu-divider"></div>
         <button role="menuitem" onclick={() => { const id = tabContextMenu?.tabId; if (id) void copyTabPath(id); }}><Copy size={16} /><span>复制文件路径</span></button>
@@ -3662,15 +3729,17 @@
       <aside class="outline-panel" aria-label="文档目录" transition:panelTransition={{ x: -8, duration: 160 }} inert={!tocVisible}>
         <div class="outline-header"><span>文档目录</span></div>
         {#if activeTab.headings.length}
-          <nav class="outline-list" aria-label="标题目录">
+          <nav class="outline-list" aria-label="标题目录" bind:this={outlineList}>
             {#each activeTab.headings as heading (heading.id)}
               <button
                 class="outline-item"
+                class:root-heading={heading.level === 1}
                 class:current={activeHeadingId === heading.id}
                 aria-current={activeHeadingId === heading.id ? "location" : undefined}
                 style={"--heading-indent:" + ((heading.level - 1) * 12 + 8) + "px"}
                 title={heading.title}
                 onclick={() => jumpToHeading(heading)}
+                onkeydown={handleOutlineKeydown}
               >
                 <span>{heading.title}</span>
               </button>
@@ -3733,7 +3802,6 @@
               editorCompartments={activeTab.editorCompartments}
               cursor={activeTab.cursor}
               editorScrollProgress={activeTab.editorScrollProgress}
-              lineEnding={activeTab.lineEnding}
               darkMode={darkMode}
               wordWrap={editorWordWrap}
               indentWidth={editorIndentWidth}
@@ -5682,7 +5750,8 @@
     flex-direction: column;
     gap: 2px;
     overflow: auto;
-    padding: 0 12px 24px;
+    overscroll-behavior-y: contain;
+    padding: 6px 12px 24px;
   }
 
   .outline-item {
@@ -5719,10 +5788,16 @@
     background: color-mix(in srgb, var(--accent) 8%, transparent);
   }
 
+  .outline-item.root-heading {
+    color: var(--text);
+    font-weight: 500;
+  }
+
   .outline-item.current {
     --button-pressed-bg: var(--selected-bg);
     color: var(--accent);
     background: var(--selected-bg);
+    font-weight: 600;
   }
 
   .outline-item.current::before {

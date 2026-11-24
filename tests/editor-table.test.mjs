@@ -72,6 +72,21 @@ test("keeps line break tags literal when they are escaped or inside inline code"
   assert.doesNotMatch(table.html, /<br\b/);
 });
 
+test("edits rendered cell breaks as newlines and preserves literal tags", () => {
+  const raw = "甲\\|乙<BR />下一行\\<br>、`<br>`、[链<br/>接](https://example.com)";
+  const state = editorState(`| 名称 | 内容 |\n| --- | --- |\n| ${raw} | 保留 |`);
+  const [table] = readEditorTables(state);
+  const cell = table.rows[1][0];
+  assert.equal(cell.inputText, "甲\\|乙\n下一行\\<br>、`<br>`、[链\n接](https://example.com)");
+  assert.equal(editTableCell(state, cell, cell.inputText), null);
+
+  const change = editTableCell(state, cell, cell.inputText.replace("下一行", "修改"));
+  assert.ok(change);
+  const updated = state.update({ changes: change }).state;
+  assert.equal(updated.doc.line(3).text, "| 甲\\|乙<br>修改\\<br>、`<br>`、[链<br>接](https://example.com) | 保留 |");
+  assert.equal(readEditorTables(updated)[0].rows[1][0].inputText, cell.inputText.replace("下一行", "修改"));
+});
+
 test("fills a missing cell without touching extra columns or unrelated Markdown", () => {
   const state = editorState("| 左 | 右 |\n| --- | --- |\n| 甲 |\n| 乙 | 丙 | 原文保留 |\n\n正文");
   const [table] = readEditorTables(state);

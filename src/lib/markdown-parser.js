@@ -9,7 +9,10 @@ export function createMarkdownParser(options = {}) {
     if (state.src[state.pos] !== "<") return false;
     const match = /^<br[ \t]*\/?>/i.exec(state.src.slice(state.pos, state.posMax));
     if (!match) return false;
-    if (!silent) state.push("hardbreak", "br", 0);
+    if (!silent) {
+      const token = state.push("hardbreak", "br", 0);
+      token.meta = { lineBreakTag: { from: state.pos, to: state.pos + match[0].length } };
+    }
     state.pos += match[0].length;
     return true;
   });
