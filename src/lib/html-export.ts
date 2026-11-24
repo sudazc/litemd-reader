@@ -70,8 +70,8 @@ const readerStyles = `
   .reader-content h1:first-child, .reader-content h2:first-child,
   .reader-content h3:first-child, .reader-content h4:first-child,
   .reader-content h5:first-child, .reader-content h6:first-child { margin-top: 0; }
-  .reader-content h1 { margin: 1.4em 0 0.78em; font-size: 1.8em; line-height: 1.3; font-weight: 650; }
-  .reader-content h2 { margin: 1.43em 0 0.57em; font-size: 1.4em; line-height: 1.4; font-weight: 650; }
+  .reader-content h1 { margin: 1.4em 0 0.7em; font-size: 1.8em; line-height: 1.3; font-weight: 680; letter-spacing: -0.015em; }
+  .reader-content h2 { margin: 1.48em 0 0.6em; padding-bottom: 0.22em; border-bottom: 1px solid var(--line); font-size: 1.4em; line-height: 1.4; font-weight: 650; }
   .reader-content h3 { margin: 1.33em 0 0.5em; font-size: 1.2em; line-height: 1.45; font-weight: 650; }
   .reader-content h4 { margin: 1.09em 0 0.45em; font-size: 1.1em; line-height: 1.45; }
   .reader-content h5 { margin: 1.2em 0 0.4em; font-size: 1em; line-height: 1.5; }

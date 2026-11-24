@@ -71,6 +71,7 @@
     editorScrollProgress: number;
     onCursorChange: (cursor: number, line: number) => void;
     onScrollPositionChange: (scrollTop: number, progress: number) => void;
+    onSearchOpenChange: (open: boolean) => void;
     onSave: (saveAs: boolean) => void;
     onEditorStateChange: (
       state: EditorState,
@@ -78,6 +79,7 @@
       documentChanged: boolean,
     ) => void;
     darkMode: boolean;
+    livePreview: boolean;
     wordWrap: boolean;
     indentWidth: number;
     selectionToolbarEnabled: boolean;
@@ -91,9 +93,11 @@
     editorScrollProgress,
     onCursorChange,
     onScrollPositionChange,
+    onSearchOpenChange,
     onSave,
     onEditorStateChange,
     darkMode,
+    livePreview,
     wordWrap,
     indentWidth,
     selectionToolbarEnabled,
@@ -130,12 +134,14 @@
   let editorResizeObserver: ResizeObserver | undefined;
   let scrollFrame: number | undefined;
   let applyEditorPreferences:
-    | ((nextWordWrap: boolean, nextIndentWidth: number) => void)
+    | ((nextWordWrap: boolean, nextIndentWidth: number, nextLivePreview: boolean) => void)
     | undefined;
   let searchPanelOpener:
     | ((view: import("@codemirror/view").EditorView) => boolean)
     | undefined;
-  let searchPanelCloser: (() => void) | undefined;
+  let searchPanelCloser:
+    | ((view: import("@codemirror/view").EditorView, clearSelection?: boolean) => void)
+    | undefined;
   let selectionComesFromSearch = false;
   let searchRequested = false;
   let pendingInsertAction: InsertAction | null = null;
@@ -143,7 +149,8 @@
   $effect(() => {
     const nextWordWrap = wordWrap;
     const nextIndentWidth = indentWidth;
-    untrack(() => applyEditorPreferences?.(nextWordWrap, nextIndentWidth));
+    const nextLivePreview = livePreview;
+    untrack(() => applyEditorPreferences?.(nextWordWrap, nextIndentWidth, nextLivePreview));
   });
 
   $effect(() => {
@@ -495,11 +502,23 @@
       import("@codemirror/search"),
       import("@codemirror/commands"),
       import("$lib/editor-table"),
+      import("$lib/markdown-live-preview"),
     ])
-      .then(([state, view, markdown, language, highlight, codemirror, search, commands, tableEditor]) => {
+      .then(([state, view, markdown, language, highlight, codemirror, search, commands, tableEditor, preview]) => {
         if (cancelled || !host) return;
         historyCommands = commands;
         searchPanelOpener = search.openSearchPanel;
+        const closeEditorSearchPanel = (searchView: import("@codemirror/view").EditorView, clearSelection = true) => {
+          if (!search.searchPanelOpen(searchView.state)) return;
+          selectionComesFromSearch = false;
+          const selection = searchView.state.selection.main;
+          if (clearSelection && !selection.empty) {
+            searchView.dispatch({ selection: { anchor: selection.head } });
+          }
+          search.closeSearchPanel(searchView);
+          if (clearSelection) searchView.focus();
+        };
+        searchPanelCloser = closeEditorSearchPanel;
 
         const syntaxTheme = language.syntaxHighlighting(
           language.HighlightStyle.define([
@@ -558,9 +577,8 @@
             { tag: highlight.tags.comment, color: "var(--code-comment)" },
             {
               tag: highlight.tags.heading,
-              color: "var(--code-title)",
-              textDecoration: "underline",
-              fontWeight: "bold",
+              color: "var(--editor-heading-color, var(--code-title))",
+              fontWeight: "650",
             },
             { tag: highlight.tags.invalid, color: "var(--code-number)" },
           ]),
@@ -622,17 +640,7 @@
               optionsToggle.setAttribute("aria-expanded", String(!optionsRow.hidden));
             }, "ml-editor-search-toggle");
             optionsToggle.setAttribute("aria-expanded", "false");
-            const closeEditorSearchPanel = () => {
-              const selection = searchView.state.selection.main;
-              selectionComesFromSearch = false;
-              if (!selection.empty) {
-                searchView.dispatch({ selection: { anchor: selection.head } });
-              }
-              search.closeSearchPanel(searchView);
-              searchView.focus();
-            };
-            searchPanelCloser = closeEditorSearchPanel;
-            const closeSearch = makeButton("", "关闭查找", closeEditorSearchPanel,
+            const closeSearch = makeButton("", "关闭查找", () => closeEditorSearchPanel(searchView),
               "ml-editor-search-button", "close");
             closeSearch.classList.add("ml-editor-search-close");
 
@@ -756,7 +764,7 @@
             dom.addEventListener("keydown", (event) => {
               if (event.key === "Escape") {
                 event.preventDefault();
-                closeEditorSearchPanel();
+                closeEditorSearchPanel(searchView);
               } else if (event.target === searchInput && event.key === "Enter") {
                 event.preventDefault();
                 if (event.shiftKey) search.findPrevious(searchView);
@@ -807,6 +815,7 @@
           indentation: new state.Compartment(),
         };
         mountedCompartments = compartments;
+        const previewExtensions = [preview.markdownLivePreview, tableEditor.editorTables];
         const extensions = [
           state.Prec.highest(view.keymap.of([
             { key: "Mod-s", run: () => { onSave(false); return true; } },
@@ -820,7 +829,7 @@
           codemirror.basicSetup,
           searchExtension,
           markdown.markdown({ base: markdown.markdownLanguage }),
-          tableEditor.editorTables,
+          preview.livePreviewCompartment.of(livePreview ? previewExtensions : []),
           syntaxTheme,
           state.EditorState.phrases.of({
             Find: "查找",
@@ -883,15 +892,23 @@
               extensions,
             }),
           parent: host,
+          dispatchTransactions(transactions, currentView) {
+            const wasOpen = search.searchPanelOpen(currentView.state);
+            currentView.update(transactions);
+            const open = search.searchPanelOpen(currentView.state);
+            if (!cancelled && open !== wasOpen) onSearchOpenChange(open);
+          },
         });
+        onSearchOpenChange(search.searchPanelOpen(editorView.state));
         editorView.dom.addEventListener("pointerdown", handleEditorPointerDown);
         editorView.dom.addEventListener("pointerup", handleEditorPointerUp);
         editorView.dom.addEventListener("keydown", handleEditorKeyDown);
         editorView.dom.addEventListener("keyup", handleEditorKeyUp);
         editorView.dom.addEventListener("contextmenu", handleEditorContextMenu);
         editorView.dom.addEventListener("focusout", handleEditorFocusOut);
-        applyEditorPreferences = (nextWordWrap, nextIndentWidth) => {
+        applyEditorPreferences = (nextWordWrap, nextIndentWidth, nextLivePreview) => {
           if (!editorView) return;
+          commitTableCell();
           editorView.dispatch({
             effects: [
               compartments.lineWrapping.reconfigure(
@@ -901,11 +918,12 @@
                 language.indentUnit.of(" ".repeat(nextIndentWidth)),
                 state.EditorState.tabSize.of(nextIndentWidth),
               ]),
+              preview.livePreviewCompartment.reconfigure(nextLivePreview ? previewExtensions : []),
             ],
           });
           handleEditorScroll();
         };
-        applyEditorPreferences(wordWrap, indentWidth);
+        applyEditorPreferences(wordWrap, indentWidth, livePreview);
         editorLoading = false;
         onEditorStateChange(editorView.state, compartments, false);
         editorView.focus();
@@ -937,6 +955,7 @@
       cancelled = true;
       window.removeEventListener("pointerdown", handleOutsidePointerDown);
       if (editorView) {
+        searchPanelCloser?.(editorView, false);
         if (scrollFrame !== undefined) cancelAnimationFrame(scrollFrame);
         scrollFrame = undefined;
         const cursor = editorView.state.selection.main.head;
@@ -959,6 +978,7 @@
         mountedCompartments = undefined;
         applyEditorPreferences = undefined;
       }
+      onSearchOpenChange(false);
       searchRequested = false;
       pendingInsertAction = null;
       searchPanelOpener = undefined;
@@ -1087,8 +1107,7 @@
 
   export function closeSearch() {
     searchRequested = false;
-    if (!editorView?.dom.querySelector(".ml-editor-search-panel")) return;
-    searchPanelCloser?.();
+    if (editorView) searchPanelCloser?.(editorView);
   }
 
   export function toggleSearch() {
@@ -1277,7 +1296,7 @@
   .editor-shell {
     position: relative;
     overflow: hidden;
-    background: var(--surface);
+    background: var(--reading-surface);
   }
 
   .editor-host {
@@ -1313,6 +1332,7 @@
     height: 42px;
     box-sizing: border-box;
     padding: 4px;
+    border-color: color-mix(in srgb, var(--line-strong) 50%, var(--line));
     transform-origin: bottom center;
   }
 
@@ -1353,8 +1373,9 @@
   }
 
   .selection-toolbar .selection-heading-trigger[aria-expanded="true"] {
+    --button-pressed-bg: var(--toolbar-selected-bg);
     color: var(--accent);
-    background: var(--accent-soft);
+    background: var(--toolbar-selected-bg);
   }
 
   .selection-heading-control {
@@ -1381,7 +1402,6 @@
       transform var(--duration-press-out, 150ms) var(--ease-out, ease-out);
   }
 
-  .selection-toolbar .selection-heading-trigger[aria-expanded="true"],
   .editor-context-menu button[aria-expanded="true"]:not(:disabled),
   :global(.editor-shell .editor-host .ml-editor-search-toggle[aria-expanded="true"]:not(:disabled)) {
     --button-pressed-bg: var(--accent-soft);
@@ -1544,7 +1564,7 @@
   :global(.editor-host .cm-editor) {
     height: 100%;
     color: var(--text);
-    background: var(--surface);
+    background: var(--reading-surface);
     font-size: 16px;
   }
 
@@ -1559,9 +1579,83 @@
     caret-color: var(--accent);
   }
 
+  :global(.editor-host .ml-live-preview .cm-scroller) {
+    padding-inline: max(0px, calc((100cqw - 860px) / 2));
+  }
+
+  :global(.editor-host .ml-live-preview .cm-content) {
+    --editor-heading-color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+    line-height: 1.72;
+  }
+
+  :global(.editor-host .ml-live-preview .cm-line:is(.ml-preview-heading-1, .ml-preview-heading-2,
+    .ml-preview-heading-3, .ml-preview-heading-4, .ml-preview-heading-5, .ml-preview-heading-6)) {
+    color: var(--text);
+    font-weight: 650;
+    line-height: 1.4;
+  }
+
+  :global(.editor-host .ml-preview-heading-1) { font-size: 1.8em; }
+  :global(.editor-host .ml-preview-heading-2) { font-size: 1.45em; }
+  :global(.editor-host .ml-preview-heading-3) { font-size: 1.25em; }
+  :global(.editor-host .ml-preview-heading-4) { font-size: 1.12em; }
+  :global(.editor-host .ml-preview-bold) { font-weight: 650; }
+  :global(.editor-host .ml-preview-italic) { font-style: italic; }
+  :global(.editor-host .ml-preview-strike) { text-decoration: line-through; }
+
+  :global(.editor-host :is(.ml-preview-code, .ml-preview-code-line)) {
+    font-family: "Cascadia Code", Consolas, "Microsoft YaHei UI", monospace;
+  }
+
+  :global(.editor-host .ml-preview-code) {
+    border-radius: 3px;
+    background: var(--code-bg);
+    color: var(--text);
+  }
+
+  :global(.editor-host .ml-preview-link) {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  :global(.editor-host .ml-preview-number) { color: var(--muted); }
+
+  :global(.editor-host :is(.ml-preview-bullet, .ml-preview-quote)) {
+    position: relative;
+    color: transparent;
+  }
+
+  :global(.editor-host :is(.ml-preview-bullet, .ml-preview-quote) span) {
+    color: inherit;
+  }
+
+  :global(.editor-host .ml-preview-bullet::before) {
+    position: absolute;
+    inset-inline-start: 0;
+    color: var(--muted);
+    content: "•";
+  }
+
+  :global(.editor-host .ml-preview-quote::before) {
+    position: absolute;
+    inset-block: 1px;
+    inset-inline-start: 0;
+    width: 2px;
+    border-radius: 1px;
+    background: var(--line-strong);
+    content: "";
+  }
+
+  @media (forced-colors: active) {
+    :global(.editor-host :is(.ml-preview-bullet, .ml-preview-quote)) { color: CanvasText; }
+    :global(.editor-host :is(.ml-preview-bullet, .ml-preview-quote)::before) { display: none; }
+  }
+
   :global(.editor-host .ml-editor-table) {
     /* 编辑器关闭自动换行时，表格仍以编辑区的可见宽度为准 */
-    --editor-table-available-width: max(12rem, calc(100cqw - 6rem));
+    --editor-table-available-width: min(760px, max(12rem, calc(100cqw - 6rem)));
     width: max-content;
     min-width: min(100%, 720px, var(--editor-table-available-width));
     max-width: min(100%, var(--editor-table-available-width));
@@ -1574,7 +1668,7 @@
   :global(.editor-host .ml-table-toolbar) {
     display: flex;
     justify-content: flex-end;
-    margin-bottom: 6px;
+    margin-bottom: 4px;
   }
 
   :global(.editor-host .ml-editor-table [data-editable-cell]) {
@@ -1605,7 +1699,7 @@
   }
 
   :global(.editor-host .ml-table-action) {
-    min-height: 34px;
+    min-height: 28px;
     padding: 4px 10px;
     border: 0;
     border-radius: var(--radius-control);
@@ -1629,7 +1723,7 @@
   :global(.editor-host .cm-gutters) {
     border-right: 1px solid var(--line);
     color: var(--subtle);
-    background: var(--window-bg);
+    background: color-mix(in srgb, var(--sidebar-bg) 55%, var(--reading-surface));
   }
 
   :global(.editor-host .cm-activeLine),
@@ -1943,12 +2037,42 @@
     display: none;
   }
 
+  :global(.editor-shell .editor-host .cm-editor > .cm-scroller > .cm-selectionLayer .cm-selectionBackground) {
+    background-color: color-mix(in srgb, var(--selection-bg) 68%, transparent);
+  }
+
+  :global(.editor-shell .editor-host .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground) {
+    background-color: var(--selection-bg);
+  }
+
+  :global(.editor-shell .editor-host .cm-content .ml-table-cell-input:focus::selection) {
+    background-color: var(--selection-bg) !important;
+  }
+
+  :global(.editor-shell .editor-host .cm-selectionMatch) {
+    background-color: transparent;
+    box-shadow: inset 0 -1px color-mix(in srgb, var(--accent) 70%, transparent);
+  }
+
   :global(.editor-shell .editor-host .cm-searchMatch) {
     background-color: color-mix(in srgb, var(--accent) 22%, transparent);
   }
 
   :global(.editor-shell .editor-host .cm-searchMatch-selected) {
     background-color: color-mix(in srgb, var(--accent) 46%, transparent);
+  }
+
+  @media (forced-colors: active) {
+    :global(.editor-shell .editor-host .cm-selectionBackground),
+    :global(.editor-shell .editor-host .cm-selectionMatch) {
+      outline: 1px solid Highlight;
+      outline-offset: -1px;
+    }
+
+    :global(.editor-shell .editor-host .cm-editor.cm-focused .cm-content ::selection) {
+      color: HighlightText;
+      background-color: Highlight !important;
+    }
   }
 
   .editor-error {

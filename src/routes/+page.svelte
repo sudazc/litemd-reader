@@ -194,11 +194,13 @@
   let windowFocused = $state(true);
   let resizeDirection = $state<WindowResizeDirection | null>(null);
   let settingsCategory = $state<"appearance" | "behavior" | "files" | "about">("appearance");
+  let editorLivePreview = $state(true);
   let editorWordWrap = $state(true);
   let editorIndentWidth = $state(defaultEditorIndentWidth);
   const visibleOutlineWidth = $derived(Math.min(outlineWidth, maxOutlineWidth));
   let openMenu = $state<"file" | "recent" | "tabs" | null>(null);
   let searchOpen = $state(false);
+  let editorSearchOpenId = $state<string>();
   let searchQuery = $state("");
   let searchCount = $state(0);
   let activeSearchIndex = $state(0);
@@ -675,6 +677,7 @@
         lineHeight?: number;
         restoreLastSession?: boolean;
         defaultOpenDirectory?: string;
+        editorLivePreview?: boolean;
         editorWordWrap?: boolean;
         editorIndentWidth?: number;
         outlineWidth?: number;
@@ -700,6 +703,7 @@
         typeof preferences.restoreLastSession === "boolean" ? preferences.restoreLastSession : true;
       defaultOpenDirectory =
         typeof preferences.defaultOpenDirectory === "string" ? preferences.defaultOpenDirectory : "";
+      editorLivePreview = preferences.editorLivePreview !== false;
       editorWordWrap =
         typeof preferences.editorWordWrap === "boolean" ? preferences.editorWordWrap : true;
       const savedIndentWidth = preferences.editorIndentWidth;
@@ -729,6 +733,7 @@
           lineHeight,
           restoreLastSession,
           defaultOpenDirectory,
+          editorLivePreview,
           editorWordWrap,
           editorIndentWidth,
         }),
@@ -2622,6 +2627,12 @@
     };
   }
 
+  function setEditorLivePreview(enabled: boolean) {
+    editorComponent?.commitTableCell();
+    editorLivePreview = enabled;
+    savePreferences();
+  }
+
   function setEditorIndentWidth(width: 2 | 4 | 8) {
     editorIndentWidth = width;
     savePreferences();
@@ -3414,7 +3425,7 @@
                 class="tool-button"
                 aria-label="查找当前文档"
                 title="查找当前文档 (Ctrl+F)"
-                aria-expanded={activeTab.editing ? undefined : searchOpen}
+                aria-expanded={activeTab.editing ? editorSearchOpenId === activeTab.editorInstanceId : searchOpen}
                 aria-controls={searchOpen && !activeTab.editing ? "reader-search-popover" : undefined}
                 onclick={() => { if (activeTab?.editing) editorComponent?.toggleSearch(); else toggleReaderSearch(); }}
               >
@@ -3542,10 +3553,18 @@
 
         <div class="settings-workspace-body">
           <div class="settings-nav" role="tablist" aria-label="设置类别" aria-orientation="vertical">
-            <button id="settings-tab-appearance" type="button" role="tab" aria-selected={settingsCategory === "appearance"} tabindex={settingsCategory === "appearance" ? 0 : -1} class:active={settingsCategory === "appearance"} onclick={() => (settingsCategory = "appearance")} onkeydown={handleSettingsChoiceKeydown}>阅读外观</button>
-            <button id="settings-tab-behavior" type="button" role="tab" aria-selected={settingsCategory === "behavior"} tabindex={settingsCategory === "behavior" ? 0 : -1} class:active={settingsCategory === "behavior"} onclick={() => (settingsCategory = "behavior")} onkeydown={handleSettingsChoiceKeydown}>阅读行为</button>
-            <button id="settings-tab-files" type="button" role="tab" aria-selected={settingsCategory === "files"} tabindex={settingsCategory === "files" ? 0 : -1} class:active={settingsCategory === "files"} onclick={() => (settingsCategory = "files")} onkeydown={handleSettingsChoiceKeydown}>文件</button>
-            <button id="settings-tab-about" type="button" role="tab" aria-selected={settingsCategory === "about"} tabindex={settingsCategory === "about" ? 0 : -1} class:active={settingsCategory === "about"} onclick={() => (settingsCategory = "about")} onkeydown={handleSettingsChoiceKeydown}>关于</button>
+            <button id="settings-tab-appearance" type="button" role="tab" aria-selected={settingsCategory === "appearance"} tabindex={settingsCategory === "appearance" ? 0 : -1} class:active={settingsCategory === "appearance"} onclick={() => (settingsCategory = "appearance")} onkeydown={handleSettingsChoiceKeydown}>
+              <Sun size={16} aria-hidden="true" />阅读外观
+            </button>
+            <button id="settings-tab-behavior" type="button" role="tab" aria-selected={settingsCategory === "behavior"} tabindex={settingsCategory === "behavior" ? 0 : -1} class:active={settingsCategory === "behavior"} onclick={() => (settingsCategory = "behavior")} onkeydown={handleSettingsChoiceKeydown}>
+              <Settings size={16} aria-hidden="true" />阅读行为
+            </button>
+            <button id="settings-tab-files" type="button" role="tab" aria-selected={settingsCategory === "files"} tabindex={settingsCategory === "files" ? 0 : -1} class:active={settingsCategory === "files"} onclick={() => (settingsCategory = "files")} onkeydown={handleSettingsChoiceKeydown}>
+              <FolderOpen size={16} aria-hidden="true" />文件
+            </button>
+            <button id="settings-tab-about" type="button" role="tab" aria-selected={settingsCategory === "about"} tabindex={settingsCategory === "about" ? 0 : -1} class:active={settingsCategory === "about"} onclick={() => (settingsCategory = "about")} onkeydown={handleSettingsChoiceKeydown}>
+              <BookOpen size={16} aria-hidden="true" />关于
+            </button>
           </div>
 
           <div class="settings-panel-content" role="tabpanel" id={"settings-panel-" + settingsCategory} aria-labelledby={"settings-tab-" + settingsCategory}>
@@ -3553,7 +3572,7 @@
               <section class="settings-page">
                 <h3>阅读外观</h3>
                 <div class="settings-control-row">
-                  <div class="settings-label"><span>主题</span><small>选择阅读界面的颜色</small></div>
+                  <div class="settings-label"><span>主题</span><small>应用到整个窗口</small></div>
                   <div class="settings-segmented" role="radiogroup" aria-label="主题">
                     <button type="button" role="radio" aria-checked={!darkMode} tabindex={darkMode ? -1 : 0} class:active={!darkMode} onclick={() => setTheme("light")} onkeydown={handleSettingsChoiceKeydown}>浅色</button>
                     <button type="button" role="radio" aria-checked={darkMode} tabindex={darkMode ? 0 : -1} class:active={darkMode} onclick={() => setTheme("dark")} onkeydown={handleSettingsChoiceKeydown}>深色</button>
@@ -3579,11 +3598,10 @@
                   </div>
                 </div>
                 <div class="settings-preview-wrap">
-                    <h4>字号与行距示例</h4>
+                  <h4>字号与行距预览</h4>
                   <article class="settings-preview" style={`font-size:${fontSize}px;line-height:${lineHeight}`}>
-                    <h5>让文字保持舒适</h5>
-                    <p>字号与行距会同步应用到当前文档。长文阅读时，合适的行长和留白更容易保持注意力。</p>
-                    <p>行内代码示例：<code>markdown</code></p>
+                    <h5>项目笔记</h5>
+                    <p>今天整理了文档的章节顺序，并在发布前核对了术语。下一步补充使用示例，并将它保存到 <code>README.md</code>。</p>
                   </article>
                 </div>
               </section>
@@ -3611,6 +3629,13 @@
                   />
                 </label>
                 <h4 class="settings-subsection-title">编辑器</h4>
+                <div class="settings-control-row">
+                  <div class="settings-label"><span>编辑显示</span><small>实时预览在光标所在段落显示 Markdown 语法</small></div>
+                  <div class="settings-segmented" role="radiogroup" aria-label="编辑显示">
+                    <button type="button" role="radio" aria-checked={editorLivePreview} tabindex={editorLivePreview ? 0 : -1} class:active={editorLivePreview} onclick={() => setEditorLivePreview(true)} onkeydown={handleSettingsChoiceKeydown}>实时预览</button>
+                    <button type="button" role="radio" aria-checked={!editorLivePreview} tabindex={editorLivePreview ? -1 : 0} class:active={!editorLivePreview} onclick={() => setEditorLivePreview(false)} onkeydown={handleSettingsChoiceKeydown}>源码</button>
+                  </div>
+                </div>
                 <label class="settings-switch-row">
                   <span class="settings-label"><span>自动换行</span><small>长行在编辑区内折行显示</small></span>
                   <input
@@ -3726,17 +3751,18 @@
     {/if}
 
     {#if activeTab && tocVisible && !activeTab.loading && !activeTab.error}
-      <aside class="outline-panel" aria-label="文档目录" transition:panelTransition={{ x: -8, duration: 160 }} inert={!tocVisible}>
-        <div class="outline-header"><span>文档目录</span></div>
+      <aside class="outline-panel" aria-labelledby="document-outline-title" transition:panelTransition={{ x: -8, duration: 160 }} inert={!tocVisible}>
+        <h2 class="outline-header" id="document-outline-title">文档目录</h2>
         {#if activeTab.headings.length}
           <nav class="outline-list" aria-label="标题目录" bind:this={outlineList}>
             {#each activeTab.headings as heading (heading.id)}
               <button
+                type="button"
                 class="outline-item"
                 class:root-heading={heading.level === 1}
                 class:current={activeHeadingId === heading.id}
                 aria-current={activeHeadingId === heading.id ? "location" : undefined}
-                style={"--heading-indent:" + ((heading.level - 1) * 12 + 8) + "px"}
+                style:--heading-depth={heading.level - 1}
                 title={heading.title}
                 onclick={() => jumpToHeading(heading)}
                 onkeydown={handleOutlineKeydown}
@@ -3746,7 +3772,7 @@
             {/each}
           </nav>
         {:else}
-          <p class="outline-empty">此文档没有标题目录</p>
+          <p class="outline-empty">此文档没有标题</p>
         {/if}
       </aside>
       <div
@@ -3803,6 +3829,7 @@
               cursor={activeTab.cursor}
               editorScrollProgress={activeTab.editorScrollProgress}
               darkMode={darkMode}
+              livePreview={editorLivePreview}
               wordWrap={editorWordWrap}
               indentWidth={editorIndentWidth}
               selectionToolbarEnabled={!tabContextMenu}
@@ -3811,6 +3838,10 @@
               }
               onScrollPositionChange={(scrollTop, progress) =>
                 handleEditorScrollPositionChange(editorInstanceId, scrollTop, progress)}
+              onSearchOpenChange={(open) => {
+                if (open && activeTab?.editorInstanceId === editorInstanceId) editorSearchOpenId = editorInstanceId;
+                else if (!open && editorSearchOpenId === editorInstanceId) editorSearchOpenId = undefined;
+              }}
               onSave={(saveAs) => void saveActiveTab(saveAs)}
               onEditorStateChange={(state, compartments, documentChanged) =>
                 handleEditorStateChange(editorInstanceId, state, compartments, documentChanged)}
@@ -3984,7 +4015,7 @@
   .app-shell {
     position: relative;
     --ease-out: cubic-bezier(0.333333, 1, 0.666667, 1);
-    --titlebar-height: 48px;
+    --titlebar-height: 46px;
     --toolbar-inline-padding: 16px;
     --radius-control: 6px;
     --radius-popover: 10px;
@@ -3996,8 +4027,9 @@
     --duration-theme: 160ms;
     --ease-theme: cubic-bezier(0.2, 0, 0.2, 1);
     --window-bg: #f5f6f8;
-    --chrome-bg: #f3f4f6;
-    --sidebar-bg: #f6f7f9;
+    --chrome-bg: #f4f5f7;
+    --tab-strip-bg: #edf0f4;
+    --sidebar-bg: #f7f8fa;
     --surface: #ffffff;
     --reading-surface: #ffffff;
     --surface-muted: #f1f3f6;
@@ -4015,7 +4047,8 @@
     --accent-pressed: #2b4192;
     --accent-soft: #ebefff;
     --selected-bg: #ebefff;
-    --selection-bg: #dce4ff;
+    --toolbar-selected-bg: #e5eaf7;
+    --selection-bg: #d8e4f6;
     --hover: #e9edf3;
     --pressed: #dde3ec;
     --error: #b42332;
@@ -4065,7 +4098,8 @@
   .app-shell.dark {
     color-scheme: dark;
     --window-bg: #181a20;
-    --chrome-bg: #202229;
+    --chrome-bg: #24262d;
+    --tab-strip-bg: #202229;
     --sidebar-bg: #202229;
     --surface: #24272f;
     --reading-surface: #1b1d23;
@@ -4084,7 +4118,8 @@
     --accent-pressed: #94a7f1;
     --accent-soft: #303a59;
     --selected-bg: #303a59;
-    --selection-bg: #3d4f7e;
+    --toolbar-selected-bg: #2b3347;
+    --selection-bg: #364862;
     --hover: #30343e;
     --pressed: #3a404d;
     --error: #ff9ca8;
@@ -4151,8 +4186,7 @@
   }
 
   .app-shell :global(::selection) {
-    color: var(--text);
-    background: var(--selection-bg, #dce4ff);
+    background-color: var(--selection-bg);
   }
 
   .app-shell,
@@ -4188,7 +4222,7 @@
   .titlebar {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto auto;
-    grid-template-rows: 48px;
+    grid-template-rows: minmax(0, 1fr);
     align-items: stretch;
     min-width: 0;
     height: var(--titlebar-height);
@@ -4199,7 +4233,7 @@
   }
 
   .app-shell.with-workspace-tabs .titlebar {
-    grid-template-rows: 48px 37px;
+    grid-template-rows: 46px minmax(0, 1fr);
   }
 
   .app-shell.window-inactive .tab-shell:not(.selected) .tab-name {
@@ -4211,35 +4245,6 @@
   .app-shell.window-inactive .titlebar-preferences button :global(svg),
   .app-shell.window-inactive .window-controls button :global(svg) {
     opacity: 0.86;
-  }
-
-  .titlebar-action {
-    display: inline-flex;
-    flex: 0 0 auto;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    width: auto;
-    height: 32px;
-    padding: 0 9px;
-    border: 0;
-    border-radius: var(--radius-control);
-    color: var(--muted);
-    background: transparent;
-    font-size: 14px;
-    cursor: pointer;
-  }
-
-  .titlebar-action:hover,
-  .titlebar-action[aria-pressed="true"] {
-    color: var(--text);
-    background: var(--hover);
-  }
-
-  .titlebar-action[aria-pressed="true"] {
-    --button-pressed-bg: var(--accent-soft);
-    color: var(--accent);
-    background: var(--accent-soft);
   }
 
   .titlebar-action span {
@@ -4266,9 +4271,9 @@
 
   .settings-workspace-header {
     display: flex;
-    flex: 0 0 60px;
+    flex: 0 0 52px;
     align-items: center;
-    padding: 0 28px;
+    padding: 0 24px;
     border-bottom: 1px solid var(--line);
     background: var(--chrome-bg);
   }
@@ -4283,7 +4288,7 @@
   .settings-workspace-body {
     display: grid;
     flex: 1 1 auto;
-    grid-template-columns: 208px minmax(0, 1fr);
+    grid-template-columns: 184px minmax(0, 1fr);
     min-height: 0;
   }
 
@@ -4301,19 +4306,22 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    padding: 20px 12px;
+    padding: 16px 12px;
     border-right: 1px solid var(--line);
     background: var(--sidebar-bg);
   }
 
   .settings-nav button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
     min-height: 36px;
-    padding: 0 10px;
+    padding: 0 12px;
     border: 0;
     border-radius: var(--radius-control);
     color: var(--muted);
     background: transparent;
-    font-size: 15px;
+    font-size: 14px;
     text-align: left;
     cursor: pointer;
   }
@@ -4327,6 +4335,7 @@
     --button-pressed-bg: var(--selected-bg);
     color: var(--accent);
     background: var(--selected-bg);
+    box-shadow: inset 2px 0 var(--accent);
     font-weight: 600;
   }
 
@@ -4334,7 +4343,7 @@
     min-width: 0;
     min-height: 0;
     overflow: auto;
-    padding: 32px 40px;
+    padding: 24px clamp(24px, 4vw, 44px) 32px;
     scrollbar-color: var(--line-strong) transparent;
     scrollbar-width: thin;
   }
@@ -4342,24 +4351,23 @@
   .settings-page {
     display: flex;
     flex-direction: column;
-    gap: 0;
     min-width: 0;
+    max-width: 840px;
+    margin-inline: auto;
   }
 
   .settings-page h3 {
     margin: 0 0 8px;
     color: var(--text);
-    font-size: 18px;
+    font-size: 20px;
     font-weight: 600;
     line-height: 1.5;
   }
 
   .settings-subsection-title {
-    margin: 20px 0 0;
-    padding: 18px 0 10px;
-    border-top: 1px solid var(--line);
-    color: var(--muted);
-    font-size: 14px;
+    margin: 22px 0 2px;
+    color: var(--text);
+    font-size: 16px;
     font-weight: 600;
     line-height: 1.45;
   }
@@ -4371,8 +4379,8 @@
     align-items: center;
     column-gap: 24px;
     min-width: 0;
-    min-height: 72px;
-    padding: 14px 0;
+    min-height: 62px;
+    padding: 10px 0;
     border-bottom: 1px solid var(--line);
   }
 
@@ -4386,15 +4394,19 @@
     flex: 1 1 auto;
     flex-direction: column;
     min-width: 0;
-    gap: 4px;
+    gap: 2px;
     color: var(--text);
     font-size: 15px;
+  }
+
+  .settings-label > span {
+    font-weight: 500;
   }
 
   .settings-label small,
   .settings-about-brand small {
     color: var(--muted);
-    font-size: 14px;
+    font-size: 13px;
     line-height: 1.5;
   }
 
@@ -4480,7 +4492,7 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
-    margin-top: 24px;
+    margin-top: 22px;
   }
 
   .settings-preview-wrap h4 {
@@ -4492,7 +4504,7 @@
 
   .settings-preview {
     width: 100%;
-    padding: 18px 20px;
+    padding: 18px 22px;
     border: 1px solid var(--line);
     border-radius: 8px;
     color: var(--text);
@@ -4508,11 +4520,8 @@
   }
 
   .settings-preview p {
-    margin: 0 0 0.7em;
-  }
-
-  .settings-preview p:last-child {
-    margin-bottom: 0;
+    max-inline-size: 58ch;
+    margin: 0;
   }
 
   .settings-preview code {
@@ -4524,7 +4533,6 @@
   }
 
   .settings-switch-row {
-    min-height: 56px;
     cursor: pointer;
   }
 
@@ -4570,7 +4578,7 @@
   }
 
   .settings-file-setting {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
   }
 
   .settings-file-setting > .settings-label {
@@ -4579,6 +4587,11 @@
 
   .settings-file-setting > .settings-button {
     justify-self: end;
+  }
+
+  .settings-file-setting .settings-button {
+    border-color: var(--line-strong);
+    background: var(--surface);
   }
 
   .settings-folder-control {
@@ -4599,7 +4612,7 @@
     color: var(--muted);
     font-size: 14px;
     line-height: 1.5;
-    text-align: left;
+    text-align: right;
     text-overflow: ellipsis;
     unicode-bidi: isolate;
     white-space: nowrap;
@@ -4623,8 +4636,8 @@
     height: 40px;
     place-items: center;
     border-radius: 8px;
-    color: var(--accent-foreground);
-    background: var(--accent);
+    color: var(--accent);
+    background: var(--accent-soft);
   }
 
   .settings-about-brand > div {
@@ -4659,7 +4672,7 @@
     max-width: none;
     gap: 2px;
     height: 100%;
-    padding: 0 4px;
+    padding: 0 10px;
     overflow: visible;
   }
 
@@ -4697,7 +4710,7 @@
     max-width: 100%;
     height: 100%;
     margin-inline: 0;
-    gap: 2px;
+    gap: 4px;
     -webkit-app-region: no-drag;
   }
 
@@ -4728,18 +4741,17 @@
     width: 200px;
     min-width: 112px;
     max-width: 220px;
-    height: 36px;
-    border: 0;
-    border-bottom: 2px solid transparent;
-    border-radius: 6px 6px 0 0;
+    height: 32px;
+    border: 1px solid transparent;
+    border-radius: 7px;
     color: var(--muted);
     transition: color var(--duration-interaction) var(--ease-out), background-color var(--duration-interaction) var(--ease-out);
   }
 
   .tab-shell.selected {
     color: var(--text);
-    background: color-mix(in srgb, var(--accent) 5%, var(--reading-surface));
-    border-bottom-color: var(--accent);
+    background: var(--reading-surface);
+    border-color: color-mix(in srgb, var(--line-strong) 32%, var(--line));
   }
 
   .tab-shell:not(.selected):hover {
@@ -4830,6 +4842,10 @@
     white-space: nowrap;
   }
 
+  .tab-shell.selected .tab-name {
+    font-weight: 600;
+  }
+
   .tab-directory-hint {
     flex: 0 1 auto;
     min-width: 0;
@@ -4869,10 +4885,10 @@
   }
 
   .tab-close {
-    flex: 0 0 32px;
-    width: 32px;
-    height: 32px;
-    margin-right: 5px;
+    flex: 0 0 28px;
+    width: 28px;
+    height: 28px;
+    margin-right: 3px;
     border-radius: var(--radius-control);
     opacity: 0;
   }
@@ -4929,13 +4945,6 @@
     background: var(--hover);
   }
 
-  .tool-button[aria-pressed="true"]:not(:disabled),
-  .tool-button[aria-expanded="true"]:not(:disabled) {
-    --button-pressed-bg: var(--selected-bg);
-    color: var(--accent);
-    background: var(--selected-bg);
-  }
-
   .tab-drag-space {
     flex: 1;
     min-width: 12px;
@@ -4953,16 +4962,13 @@
   .titlebar-preferences {
     grid-column: 2;
     grid-row: 1;
+    align-items: center;
+    padding: 0 7px 0 2px;
   }
 
   .window-controls {
     grid-column: 3;
     grid-row: 1;
-  }
-
-  .titlebar-preferences {
-    align-items: center;
-    padding: 0 4px;
   }
 
   .titlebar-preferences button {
@@ -4976,15 +4982,10 @@
   }
 
   .titlebar-preferences .theme-toggle {
-    align-self: center;
-    height: 32px;
+    flex: 0 0 34px;
+    width: 34px;
+    height: 34px;
     border-radius: var(--radius-control);
-  }
-
-  .titlebar-preferences .theme-toggle {
-    flex: 0 0 38px;
-    width: 38px;
-    margin: 0 4px;
   }
 
   .window-controls button:focus-visible {
@@ -5011,11 +5012,9 @@
     grid-column: 1;
     grid-row: 1;
     align-items: center;
-    gap: 12px;
+    gap: 8px;
     min-width: 0;
-    padding: 0 8px;
-    background: transparent;
-    box-shadow: none;
+    padding: 0 7px 0 10px;
   }
 
   .titlebar-tabs-row {
@@ -5023,8 +5022,8 @@
     grid-row: 2;
     display: flex;
     min-width: 0;
-    height: 37px;
     border-top: 1px solid var(--line);
+    background: var(--tab-strip-bg);
   }
 
   .toolbar-left,
@@ -5036,22 +5035,19 @@
     gap: 3px;
   }
 
-  .toolbar-left {
-    gap: 3px;
-  }
-
   .menu-wrap {
     position: relative;
   }
 
   .menu-trigger,
+  .titlebar-action,
   .tool-button {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     gap: 6px;
-    height: 32px;
-    padding: 0 9px;
+    height: 34px;
+    padding: 0 10px;
     border: 0;
     border-radius: var(--radius-control);
     color: var(--muted);
@@ -5059,26 +5055,25 @@
     cursor: pointer;
   }
 
-  .menu-trigger:hover {
+  .menu-trigger:hover,
+  .titlebar-action:hover {
     color: var(--text);
     background: var(--hover);
   }
 
-  .menu-trigger[aria-expanded="true"] {
-    --button-pressed-bg: var(--accent-soft);
+  .menu-trigger[aria-expanded="true"],
+  .titlebar-action[aria-pressed="true"],
+  .tool-button:is([aria-pressed="true"], [aria-expanded="true"]):not(:disabled) {
+    --button-pressed-bg: var(--toolbar-selected-bg);
     color: var(--accent);
-    background: var(--accent-soft);
+    background: var(--toolbar-selected-bg);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 26%, transparent);
   }
 
-  .menu-trigger {
-    font-size: 15px;
+  .menu-trigger,
+  .titlebar-action {
+    font-size: 14px;
     font-weight: 400;
-  }
-
-  .toolbar-right {
-    flex: 0 0 auto;
-    min-width: 0;
-    gap: 12px;
   }
 
   .document-navigation-actions {
@@ -5099,16 +5094,34 @@
   .document-controls-divider {
     flex: 0 0 1px;
     width: 1px;
-    height: 18px;
-    margin-inline: 2px;
+    height: 16px;
+    margin-inline: 3px;
     background: var(--line-strong);
     opacity: 0.45;
   }
 
   .tool-button {
-    width: 36px;
-    height: 36px;
+    width: 34px;
     padding: 0;
+  }
+
+  .document-controls .tool-button {
+    position: relative;
+  }
+
+  .document-controls .tool-button:is([aria-pressed="true"], [aria-expanded="true"]) {
+    box-shadow: none;
+  }
+
+  .document-controls .tool-button:is([aria-pressed="true"], [aria-expanded="true"])::after {
+    position: absolute;
+    bottom: 3px;
+    left: calc(50% - 5px);
+    width: 10px;
+    height: 2px;
+    border-radius: 2px;
+    background: currentColor;
+    content: "";
   }
 
   .app-shell .settings-nav button:focus-visible,
@@ -5119,6 +5132,7 @@
   }
 
   .app-shell .toolbar .menu-trigger:focus-visible,
+  .app-shell .toolbar .titlebar-action:focus-visible,
   .app-shell .toolbar .tool-button:focus-visible,
   .app-shell .toolbar .search-step:focus-visible,
   .app-shell .toolbar .search-close:focus-visible {
@@ -5689,6 +5703,8 @@
   }
 
   .outline-panel {
+    --outline-inline-gutter: 12px;
+    --outline-item-padding: 12px;
     display: flex;
     flex-direction: column;
     min-width: 0;
@@ -5700,9 +5716,11 @@
     display: flex;
     flex: 0 0 44px;
     align-items: center;
-    padding: 0 16px;
+    margin: 0 var(--outline-inline-gutter);
+    padding: 0 var(--outline-item-padding);
+    border-block-end: 1px solid var(--line);
     color: var(--text);
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 600;
   }
 
@@ -5711,6 +5729,7 @@
     z-index: 1;
     width: 8px;
     min-height: 0;
+    background: var(--sidebar-bg);
     cursor: col-resize;
     touch-action: none;
     user-select: none;
@@ -5720,48 +5739,65 @@
     position: absolute;
     top: 0;
     bottom: 0;
-    left: 3px;
+    inset-inline-start: 3px;
     width: 1px;
     background: var(--line);
     content: "";
   }
 
   .outline-splitter:hover::after,
-  .outline-splitter:focus-visible::after {
+  .outline-splitter:active::after {
     width: 2px;
     background: var(--accent);
   }
 
   .outline-splitter:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: -2px;
+    outline: none;
+  }
+
+  .outline-splitter:focus-visible::before {
+    position: absolute;
+    inset-block-start: 50%;
+    inset-inline-start: 2px;
+    z-index: 1;
+    width: 4px;
+    height: 28px;
+    border-radius: 2px;
+    background: var(--accent);
+    forced-color-adjust: none;
+    transform: translateY(-50%);
+    content: "";
   }
 
   .outline-empty {
     margin: 0;
-    padding: 10px 16px;
-    color: var(--subtle);
+    padding: 14px calc(var(--outline-inline-gutter) + var(--outline-item-padding));
+    color: var(--muted);
     font-size: 14px;
     line-height: 1.6;
   }
 
   .outline-list {
     display: flex;
+    flex: 1;
     flex-direction: column;
-    gap: 2px;
+    min-height: 0;
+    gap: 1px;
     overflow: auto;
     overscroll-behavior-y: contain;
-    padding: 6px 12px 24px;
+    padding: 8px var(--outline-inline-gutter) 20px;
   }
 
   .outline-item {
+    --heading-indent: calc(var(--outline-item-padding) + var(--heading-depth) * 11px);
     position: relative;
     display: block;
     width: 100%;
     min-width: 0;
     flex-shrink: 0;
     min-height: 32px;
-    padding: 5px 6px 5px var(--heading-indent);
+    padding-block: 6px;
+    padding-inline: var(--heading-indent) 8px;
     border: 0;
     border-radius: var(--radius-control);
     color: var(--muted);
@@ -5769,7 +5805,7 @@
     font-size: 14px;
     font-weight: 400;
     line-height: 1.4;
-    text-align: left;
+    text-align: start;
     white-space: normal;
     overflow-wrap: anywhere;
     cursor: pointer;
@@ -5785,30 +5821,47 @@
 
   .outline-item:hover {
     color: var(--text);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--hover);
   }
 
   .outline-item.root-heading {
     color: var(--text);
-    font-weight: 500;
+    font-weight: 600;
+  }
+
+  .outline-item.root-heading:not(:first-child) {
+    margin-block-start: 7px;
+  }
+
+  .outline-item:not(.root-heading)::after {
+    position: absolute;
+    inset-block: 8px;
+    inset-inline-start: calc(var(--heading-indent) - 7px);
+    width: 1px;
+    background: var(--line-strong);
+    opacity: 0.44;
+    content: "";
   }
 
   .outline-item.current {
-    --button-pressed-bg: var(--selected-bg);
-    color: var(--accent);
-    background: var(--selected-bg);
+    --button-pressed-bg: color-mix(in srgb, var(--accent) 18%, var(--sidebar-bg));
+    color: var(--text);
+    background: color-mix(in srgb, var(--accent) 11%, var(--sidebar-bg));
     font-weight: 600;
   }
 
   .outline-item.current::before {
     position: absolute;
-    top: 8px;
-    bottom: 8px;
-    left: 5px;
+    inset-block: 6px;
+    inset-inline-start: 3px;
     width: 2px;
     border-radius: 2px;
-    background: var(--accent);
+    background: var(--outline-current-marker, var(--accent));
     content: "";
+  }
+
+  .outline-list .outline-item:focus-visible {
+    outline-offset: -2px;
   }
 
   .empty-workspace {
@@ -5961,7 +6014,7 @@
     min-width: 0;
     min-height: 0;
     overflow: hidden;
-    background: var(--surface);
+    background: var(--reading-surface);
   }
 
   .reader-content {
@@ -6005,30 +6058,20 @@
   }
 
   .reader-content :global(h1) {
-    margin: 1.4em 0 0.78em;
-    padding-left: 14px;
-    border-left: 3px solid var(--accent);
+    margin: 1.4em 0 0.7em;
     font-size: 1.8em;
     line-height: 1.3;
-    font-weight: 650;
+    font-weight: 680;
+    letter-spacing: -0.015em;
   }
 
   .reader-content :global(h2) {
-    margin: 1.43em 0 0.57em;
+    margin: 1.48em 0 0.6em;
+    padding-bottom: 0.22em;
+    border-bottom: 1px solid var(--line);
     font-size: 1.4em;
     line-height: 1.4;
     font-weight: 650;
-  }
-
-  .reader-content :global(h2)::before {
-    display: inline-block;
-    width: 7px;
-    height: 7px;
-    margin-right: 10px;
-    border-radius: 2px;
-    background: var(--accent);
-    content: "";
-    vertical-align: 0.2em;
   }
 
   .reader-content :global(h3) {
@@ -6457,6 +6500,7 @@
     .app-shell.dark {
       --window-bg: Canvas;
       --chrome-bg: Canvas;
+      --tab-strip-bg: Canvas;
       --sidebar-bg: Canvas;
       --surface: Canvas;
       --reading-surface: Canvas;
@@ -6475,6 +6519,7 @@
       --accent-pressed: Highlight;
       --accent-soft: Canvas;
       --selected-bg: Highlight;
+      --toolbar-selected-bg: Highlight;
       --selection-bg: Highlight;
       --hover: Canvas;
       --pressed: Canvas;
@@ -6503,6 +6548,10 @@
       --shadow-dialog: none;
     }
 
+    .app-shell :global(::selection) {
+      color: HighlightText;
+    }
+
     .app-shell :global(button:focus-visible),
     .app-shell :global(a:focus-visible),
     .app-shell .reader-viewport:focus-visible,
@@ -6513,11 +6562,28 @@
 
     .app-shell .settings-nav button.active,
     .app-shell .settings-segmented button.active,
-    .app-shell .tool-button[aria-pressed="true"],
-    .app-shell .tool-button[aria-expanded="true"],
-    .app-shell .titlebar-action[aria-pressed="true"],
-    .app-shell .menu-trigger[aria-expanded="true"],
     .app-shell .outline-item.current {
+      color: HighlightText;
+      background: Highlight;
+    }
+
+    .app-shell .outline-item.current {
+      --button-pressed-bg: Highlight;
+      --outline-current-marker: HighlightText;
+    }
+
+    .app-shell .toolbar :is(.menu-trigger, .titlebar-action, .tool-button):focus-visible {
+      outline-color: var(--toolbar-focus-ring, Highlight);
+    }
+
+    .app-shell .toolbar :is(
+      .menu-trigger[aria-expanded="true"],
+      .titlebar-action[aria-pressed="true"],
+      .tool-button[aria-pressed="true"],
+      .tool-button[aria-expanded="true"]
+    ) {
+      --toolbar-focus-ring: HighlightText;
+      forced-color-adjust: none;
       color: HighlightText;
       background: Highlight;
     }
@@ -6916,6 +6982,7 @@
       border-bottom: 1px solid var(--line);
     }
     .settings-nav button { flex: 0 0 auto; }
+    .settings-nav button.active { box-shadow: inset 0 -2px var(--accent); }
     .settings-panel-content { padding: 24px; }
     .settings-control-row,
     .settings-switch-row,
@@ -6974,7 +7041,7 @@
       padding: 32px 19px 64px;
     }
 
-    .settings-workspace-header { flex-basis: 56px; padding: 0 20px; }
+    .settings-workspace-header { flex-basis: 48px; padding: 0 20px; }
     .settings-panel-content { padding: 20px; }
     .toolbar-left .menu-trigger > :global(svg) { display: none; }
     .settings-toggle > :global(svg) { display: none; }
@@ -6982,12 +7049,14 @@
 
   @media (max-width: 420px) {
     .settings-workspace-header { padding: 0 16px; }
+    .settings-nav button { padding-inline: 10px; }
+    .settings-nav button > :global(svg) { display: none; }
     .settings-panel-content { padding: 18px 16px; }
     .settings-control-row,
     .settings-switch-row { display: flex; align-items: flex-start; flex-direction: column; gap: 10px; }
     .settings-switch-row { flex-direction: row; align-items: center; }
-    .settings-page { gap: 0; }
     .settings-folder-control { grid-column: 1; align-items: flex-start; flex-direction: column; }
+    .settings-path { max-width: 100%; text-align: left; }
     .settings-file-setting { grid-template-columns: minmax(0, 1fr); }
     .settings-file-setting > .settings-button { justify-self: stretch; }
     .settings-button { width: 100%; }
