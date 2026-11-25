@@ -198,7 +198,6 @@ export function tooltipLayer(node: HTMLElement) {
     tooltip.textContent = title;
     tooltip.style.setProperty("--tooltip-text", rootStyle.getPropertyValue("--text").trim());
     tooltip.style.setProperty("--tooltip-surface", rootStyle.getPropertyValue("--surface").trim());
-    tooltip.style.setProperty("--tooltip-line", rootStyle.getPropertyValue("--line").trim());
     tooltip.style.setProperty("--tooltip-shadow", rootStyle.getPropertyValue("--shadow-popover").trim());
     tooltip.style.fontFamily = rootStyle.fontFamily;
     document.body.append(tooltip);

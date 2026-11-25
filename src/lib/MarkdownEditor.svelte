@@ -1317,7 +1317,7 @@
   .editor-context-menu {
     position: absolute;
     z-index: 30;
-    border: 1px solid var(--line-strong);
+    border: 0;
     border-radius: var(--radius-popover);
     color: var(--text);
     background: var(--surface);
@@ -1332,7 +1332,6 @@
     height: 42px;
     box-sizing: border-box;
     padding: 4px;
-    border-color: color-mix(in srgb, var(--line-strong) 50%, var(--line));
     transform-origin: bottom center;
   }
 
@@ -1416,7 +1415,7 @@
     grid-template-columns: repeat(3, 32px);
     gap: 4px;
     padding: 4px;
-    border: 1px solid var(--line);
+    border: 0;
     border-radius: var(--radius-popover);
     background: var(--surface);
     box-shadow: var(--shadow-popover, var(--shadow));
@@ -1454,7 +1453,6 @@
     box-sizing: border-box;
     overflow: auto;
     padding: 6px;
-    border-color: var(--line);
     transform-origin: top left;
   }
 
@@ -1771,7 +1769,7 @@
     width: min(520px, calc(100% - 16px));
     padding: 5px 8px;
     box-sizing: border-box;
-    border: 1px solid var(--line);
+    border: 0;
     border-radius: 10px;
     color: var(--text);
     background: var(--surface);
@@ -1825,20 +1823,20 @@
     height: 32px;
     padding: 0 9px;
     box-sizing: border-box;
-    border: 1px solid var(--line-strong);
-    border-radius: var(--radius-control);
+    border: 0;
+    border-block-end: 2px solid transparent;
+    border-radius: var(--radius-control) var(--radius-control) 2px 2px;
     color: var(--text);
-    background: var(--surface-muted);
+    background: var(--field-bg, var(--surface-muted));
+    caret-color: var(--accent);
     font: inherit;
     font-size: 15px;
-    transition:
-      border-color var(--duration-interaction, 100ms) var(--ease-out, ease-out),
-      outline-color var(--duration-interaction, 100ms) var(--ease-out, ease-out);
+    transition: border-color var(--duration-interaction, 100ms) var(--ease-out, ease-out);
   }
 
   :global(.editor-shell .editor-host .ml-editor-search-input:focus) {
-    outline: 2px solid var(--accent);
-    outline-offset: 1px;
+    border-block-end-color: var(--accent);
+    outline: none;
   }
 
   :global(.editor-shell .editor-host .ml-editor-search-input::placeholder) {
@@ -1948,6 +1946,22 @@
   }
 
   @media (forced-colors: active) {
+    .selection-toolbar,
+    .selection-heading-options,
+    .editor-context-menu,
+    :global(.editor-shell .editor-host .ml-editor-search-panel) {
+      border: 1px solid CanvasText;
+    }
+
+    :global(.editor-shell .editor-host .ml-editor-search-input) {
+      border: 1px solid ButtonBorder;
+      border-block-end-width: 2px;
+    }
+
+    :global(.editor-shell .editor-host .ml-editor-search-input:focus) {
+      border-block-end-color: Highlight;
+    }
+
     .selection-toolbar .selection-heading-trigger[aria-expanded="true"],
     .editor-context-menu button[aria-expanded="true"]:not(:disabled),
     :global(.editor-shell .editor-host .ml-editor-search-toggle[aria-expanded="true"]:not(:disabled)) {

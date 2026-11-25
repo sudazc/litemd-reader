@@ -3444,7 +3444,7 @@
                     <button class="search-close" aria-label="关闭查找" title="关闭查找" onclick={closeSearch}><X size={16} /></button>
                   </div>
                   <div class="search-popover-body">
-                    <div class="search-box search-popover-field">
+                    <div class="search-box">
                       <Search size={16} aria-hidden="true" />
                       <input bind:this={searchInput} bind:value={searchQuery} placeholder="查找当前文档" aria-label="查找当前文档" onkeydown={handleSearchKeydown} />
                     </div>
@@ -4033,6 +4033,7 @@
     --surface: #ffffff;
     --reading-surface: #ffffff;
     --surface-muted: #f1f3f6;
+    --field-bg: #f0f2f6;
     --surface-highlight: rgba(255, 255, 255, 0.7);
     --text: #252830;
     --muted: #353b45;
@@ -4104,6 +4105,7 @@
     --surface: #24272f;
     --reading-surface: #1b1d23;
     --surface-muted: #252932;
+    --field-bg: #2f3340;
     --surface-highlight: rgba(255, 255, 255, 0.04);
     --text: #e6e8ee;
     --muted: #adb3c0;
@@ -4292,12 +4294,13 @@
     min-height: 0;
   }
 
-  .settings-notice {
+  .notice.settings-notice {
     position: static;
     width: auto;
     max-width: none;
     max-height: min(30vh, 180px);
     margin: 0 24px 16px;
+    background: var(--surface-muted);
     translate: none;
     box-shadow: none;
   }
@@ -4505,10 +4508,9 @@
   .settings-preview {
     width: 100%;
     padding: 18px 22px;
-    border: 1px solid var(--line);
     border-radius: 8px;
     color: var(--text);
-    background: var(--reading-surface);
+    background: color-mix(in srgb, var(--field-bg) 65%, var(--reading-surface));
     font-weight: 400;
     overflow-wrap: anywhere;
   }
@@ -4527,7 +4529,7 @@
   .settings-preview code {
     padding: 0.15em 0.35em;
     border-radius: 4px;
-    background: var(--surface-muted);
+    background: color-mix(in srgb, var(--text) 8%, transparent);
     font-family: "Cascadia Code", Consolas, monospace;
     font-size: 0.9em;
   }
@@ -5155,10 +5157,13 @@
 
   .app-shell .toolbar .menu-trigger:focus-visible,
   .app-shell .toolbar .titlebar-action:focus-visible,
-  .app-shell .toolbar .tool-button:focus-visible,
-  .app-shell .toolbar .search-step:focus-visible,
-  .app-shell .toolbar .search-close:focus-visible {
+  .app-shell .toolbar .tool-button:focus-visible {
     outline-offset: -2px;
+  }
+
+  .app-shell .search-popover :is(.search-step, .search-close):focus-visible {
+    outline: 0;
+    box-shadow: inset 0 -2px var(--accent);
   }
 
   .tool-button:disabled {
@@ -5179,12 +5184,16 @@
     padding: 6px;
     overflow-y: auto;
     overscroll-behavior: contain;
-    border: 1px solid var(--line);
     border-radius: var(--radius-popover);
     color: var(--text);
     background: var(--surface);
     box-shadow: var(--shadow-popover);
     transform-origin: top left;
+  }
+
+  .dropdown-menu:focus-visible {
+    outline: 0;
+    box-shadow: var(--shadow-popover), inset 0 2px var(--accent);
   }
 
   .search-popover {
@@ -5199,7 +5208,6 @@
     padding: 0;
     overflow: visible;
     box-sizing: border-box;
-    border: 1px solid var(--line);
     border-radius: var(--radius-popover);
     color: var(--text);
     background: var(--surface);
@@ -5211,9 +5219,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    min-height: 44px;
+    min-height: 42px;
     padding: 0 8px 0 14px;
-    border-bottom: 1px solid var(--line);
   }
 
   .search-popover-title {
@@ -5232,33 +5239,8 @@
   .search-popover-body {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    padding: 12px;
-  }
-
-  .search-popover .search-box {
-    width: 100%;
-    height: 38px;
-    padding: 0 8px 0 10px;
-    gap: 7px;
-    border-color: var(--line-strong);
-    border-radius: var(--radius-control);
-    background: var(--surface);
-  }
-
-  .search-popover .search-box:focus-within {
-    border-color: var(--accent);
-    outline: 2px solid var(--accent);
-    outline-offset: 1px;
-  }
-
-  .search-popover .search-box > :global(svg) {
-    flex: 0 0 16px;
-    color: var(--muted);
-  }
-
-  .search-popover .search-box input:focus {
-    outline: 0;
+    gap: 6px;
+    padding: 0 12px 8px;
   }
 
   .search-popover-footer {
@@ -5380,7 +5362,8 @@
   }
 
   .app-shell .dropdown-menu button:focus-visible:not(:disabled) {
-    outline-offset: -2px;
+    outline: 0;
+    box-shadow: inset 2px 0 var(--accent);
   }
 
   .dropdown-menu button {
@@ -5587,14 +5570,22 @@
     display: flex;
     align-items: center;
     gap: 7px;
-    width: min(400px, calc(100vw - 24px));
-    height: 44px;
-    padding: 0 5px 0 10px;
+    width: 100%;
+    height: 38px;
+    padding: 0 10px;
     box-sizing: border-box;
-    border: 1px solid var(--line-strong);
-    border-radius: var(--radius-popover);
+    border-block-end: 2px solid transparent;
+    border-radius: var(--radius-control);
     color: var(--muted);
-    background: var(--surface);
+    background: var(--field-bg);
+  }
+
+  .search-box:focus-within {
+    border-block-end-color: var(--accent);
+  }
+
+  .search-box > :global(svg) {
+    flex: 0 0 16px;
   }
 
   .search-box input {
@@ -6007,8 +5998,8 @@
   }
 
   .reader-viewport:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: -2px;
+    outline: 0;
+    box-shadow: inset 0 2px var(--accent);
   }
 
   .editor-workspace {
@@ -6505,7 +6496,7 @@
 
   @media (forced-colors: active) {
     :global(.app-tooltip) {
-      border-color: ButtonBorder;
+      border: 1px solid CanvasText;
       color: CanvasText;
       background: Canvas;
       box-shadow: none;
@@ -6520,6 +6511,7 @@
       --surface: Canvas;
       --reading-surface: Canvas;
       --surface-muted: Canvas;
+      --field-bg: Field;
       --surface-highlight: Canvas;
       --text: CanvasText;
       --muted: CanvasText;
@@ -6569,10 +6561,30 @@
 
     .app-shell :global(button:focus-visible),
     .app-shell :global(a:focus-visible),
-    .app-shell .reader-viewport:focus-visible,
     .reader-content :global(.reader-table-wrap:focus-visible),
     .reader-content :global(.reader-table-scrollbar:focus-visible) {
       outline-color: HighlightText;
+    }
+
+    .app-shell :is(.dropdown-menu, .search-popover) {
+      border: 1px solid CanvasText;
+    }
+
+    .app-shell .search-box {
+      border: 1px solid ButtonBorder;
+      border-block-end-width: 2px;
+    }
+
+    .app-shell .search-box:focus-within {
+      border-block-end-color: Highlight;
+    }
+
+    .app-shell .dropdown-menu:focus-visible,
+    .app-shell .dropdown-menu button:focus-visible:not(:disabled),
+    .app-shell .search-popover :is(.search-step, .search-close):focus-visible,
+    .app-shell .reader-viewport:focus-visible {
+      outline: 2px solid Highlight;
+      outline-offset: -2px;
     }
 
     .app-shell .settings-nav button.active,
@@ -6730,7 +6742,7 @@
     transform-origin: center;
   }
 
-  .image-preview-notice {
+  .notice.image-preview-notice {
     position: absolute;
     z-index: 1;
   }
@@ -6760,12 +6772,6 @@
     outline-color: #fff;
   }
 
-  @media (forced-colors: active) {
-    .app-shell .image-zoom-close:focus-visible {
-      outline-color: HighlightText;
-    }
-  }
-
   .app-shell .image-zoom-close :global(svg) {
     width: 20px;
     height: 20px;
@@ -6779,12 +6785,15 @@
     display: flex;
     flex-direction: column;
     padding: 24px;
-    border: 1px solid var(--line);
     border-radius: var(--radius-dialog);
     color: var(--text);
     background: var(--surface);
     box-shadow: var(--shadow-dialog);
     transform-origin: center;
+  }
+
+  .confirm-dialog:focus {
+    outline: none;
   }
 
   .confirm-dialog h2 {
@@ -6809,12 +6818,13 @@
     overflow-wrap: anywhere;
   }
 
-  .confirm-notice {
+  .notice.confirm-notice {
     position: static;
     width: 100%;
     max-width: none;
     max-height: min(30vh, 180px);
     margin-top: 16px;
+    background: var(--surface-muted);
     translate: none;
     box-shadow: none;
   }
@@ -6867,7 +6877,6 @@
     max-height: min(50vh, 240px);
     padding: 12px 16px;
     overflow: auto;
-    border: 1px solid var(--line);
     border-radius: var(--radius-popover);
     color: var(--text);
     background: var(--surface);
@@ -6902,6 +6911,37 @@
     background: var(--hover);
   }
 
+  .app-shell .notice > button:focus-visible {
+    outline-offset: -2px;
+  }
+
+  @media (forced-colors: active) {
+    .confirm-dialog,
+    .notice,
+    .image-zoom-close,
+    .dialog-actions button,
+    .notice > button {
+      border: 1px solid ButtonBorder;
+    }
+
+    .dialog-actions button:disabled {
+      border-color: GrayText;
+    }
+
+    .dialog-actions .primary-button:not(:disabled) {
+      forced-color-adjust: none;
+      border-color: Highlight;
+      color: HighlightText;
+      background: Highlight;
+    }
+
+    .app-shell .confirm-dialog button:focus-visible,
+    .app-shell .notice > button:focus-visible,
+    .app-shell .image-zoom-close:focus-visible {
+      outline-color: Highlight;
+    }
+  }
+
   :global(.app-tooltip) {
     position: fixed;
     z-index: 40;
@@ -6910,7 +6950,6 @@
     max-height: min(200px, calc(100vh - 24px));
     padding: 6px 10px;
     overflow: auto;
-    border: 1px solid var(--tooltip-line, ButtonBorder);
     border-radius: var(--radius-control, 6px);
     color: var(--tooltip-text, CanvasText);
     background: var(--tooltip-surface, Canvas);
