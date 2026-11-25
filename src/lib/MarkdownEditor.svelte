@@ -1961,6 +1961,10 @@
     :global(.editor-shell .editor-host .ml-editor-search-button:focus-visible),
     :global(.editor-shell .editor-host .ml-editor-search-toggle:focus-visible),
     :global(.editor-shell .editor-host .ml-editor-search-action:focus-visible) {
+      outline-color: Highlight;
+    }
+
+    .editor-context-menu button[aria-expanded="true"]:focus-visible:not(:disabled) {
       outline-color: HighlightText;
     }
 
@@ -1988,19 +1992,6 @@
 
   :global(.editor-shell .editor-host .ml-editor-search-options > .ml-editor-search-action) {
     margin-left: auto;
-  }
-
-  :global(.editor-shell .editor-host .ml-editor-search-options > .ml-editor-search-action:not(:disabled)) {
-    box-sizing: border-box;
-    height: 32px;
-    padding: 0 9px;
-    border: 1px solid var(--line-strong);
-    color: var(--text);
-    background: var(--surface);
-  }
-
-  :global(.editor-shell .editor-host .ml-editor-search-options > .ml-editor-search-action:not(:disabled):hover) {
-    background: var(--hover);
   }
 
   :global(.editor-shell .editor-host .ml-editor-search-option) {

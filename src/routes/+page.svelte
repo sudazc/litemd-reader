@@ -4416,10 +4416,10 @@
     flex: 0 0 auto;
     align-items: center;
     min-height: 36px;
-    padding: 1px;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: var(--surface-muted);
+  }
+
+  .settings-segmented {
+    gap: 2px;
   }
 
   .settings-segmented button {
@@ -4443,12 +4443,11 @@
     --button-pressed-bg: var(--selected-bg);
     color: var(--accent);
     background: var(--selected-bg);
-    font-weight: 500;
+    font-weight: 600;
   }
 
   .font-size-stepper {
     gap: 4px;
-    padding: 1px;
   }
 
   .font-size-controls {
@@ -4466,7 +4465,7 @@
     border: 0;
     border-radius: var(--radius-control);
     color: var(--muted);
-    background: transparent;
+    background: var(--surface-muted);
     cursor: pointer;
   }
 
@@ -4477,6 +4476,7 @@
 
   .font-size-stepper button:disabled {
     color: var(--disabled);
+    background: transparent;
     cursor: default;
   }
 
@@ -4590,8 +4590,7 @@
   }
 
   .settings-file-setting .settings-button {
-    border-color: var(--line-strong);
-    background: var(--surface);
+    background: var(--surface-muted);
   }
 
   .settings-folder-control {
@@ -4620,6 +4619,33 @@
 
   .settings-button {
     flex: 0 0 auto;
+  }
+
+  @media (forced-colors: active) {
+    .settings-segmented button,
+    .font-size-stepper button,
+    .settings-file-setting .settings-button {
+      border: 1px solid ButtonBorder;
+    }
+
+    .font-size-stepper button:disabled {
+      border-color: GrayText;
+    }
+
+    .settings-nav button.active,
+    .settings-segmented button.active {
+      forced-color-adjust: none;
+    }
+
+    .app-shell .settings-segmented button:focus-visible,
+    .app-shell .font-size-stepper button:focus-visible,
+    .app-shell .settings-button:focus-visible {
+      outline-color: Highlight;
+    }
+
+    .app-shell .settings-segmented button.active:focus-visible {
+      outline-color: HighlightText;
+    }
   }
 
   .settings-about-brand {
@@ -4742,7 +4768,6 @@
     min-width: 112px;
     max-width: 220px;
     height: 32px;
-    border: 1px solid transparent;
     border-radius: 7px;
     color: var(--muted);
     transition: color var(--duration-interaction) var(--ease-out), background-color var(--duration-interaction) var(--ease-out);
@@ -4751,7 +4776,6 @@
   .tab-shell.selected {
     color: var(--text);
     background: var(--reading-surface);
-    border-color: color-mix(in srgb, var(--line-strong) 32%, var(--line));
   }
 
   .tab-shell:not(.selected):hover {
@@ -5062,12 +5086,14 @@
   }
 
   .menu-trigger[aria-expanded="true"],
-  .titlebar-action[aria-pressed="true"],
-  .tool-button:is([aria-pressed="true"], [aria-expanded="true"]):not(:disabled) {
+  .titlebar-action[aria-pressed="true"] {
     --button-pressed-bg: var(--toolbar-selected-bg);
     color: var(--accent);
     background: var(--toolbar-selected-bg);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 26%, transparent);
+  }
+
+  .tool-button:is([aria-pressed="true"], [aria-expanded="true"]):not(:disabled) {
+    color: var(--accent);
   }
 
   .menu-trigger,
@@ -5107,10 +5133,6 @@
 
   .document-controls .tool-button {
     position: relative;
-  }
-
-  .document-controls .tool-button:is([aria-pressed="true"], [aria-expanded="true"]) {
-    box-shadow: none;
   }
 
   .document-controls .tool-button:is([aria-pressed="true"], [aria-expanded="true"])::after {
@@ -5903,7 +5925,7 @@
     min-height: 36px;
     margin: 0;
     padding: 0 14px;
-    border: 1px solid transparent;
+    border: 0;
     border-radius: var(--radius-control);
     font-size: 15px;
     font-weight: 500;
@@ -5912,7 +5934,6 @@
 
   .primary-button {
     --button-pressed-bg: var(--accent-pressed);
-    border-color: var(--accent);
     color: var(--accent-foreground);
     background: var(--accent);
   }
@@ -5935,14 +5956,12 @@
   }
 
   .primary-button:hover:not(:disabled) {
-    border-color: var(--accent-hover);
     background: var(--accent-hover);
   }
 
   .secondary-button,
   .settings-button {
     --button-pressed-bg: var(--pressed);
-    border-color: transparent;
     color: var(--text);
     background: transparent;
   }
@@ -6439,10 +6458,6 @@
     transition-duration: var(--duration-press-in);
   }
 
-  .app-shell :global(button.primary-button:active:not(:disabled)) {
-    border-color: var(--accent-pressed);
-  }
-
   @media (prefers-reduced-motion: reduce) {
     .app-shell {
       --duration-theme: 80ms;
@@ -6586,6 +6601,21 @@
       forced-color-adjust: none;
       color: HighlightText;
       background: Highlight;
+    }
+
+    .app-shell .tab-shell :is(.tab-button, .tab-close):focus-visible {
+      outline-color: Highlight;
+    }
+
+    .app-shell .tab-shell.selected::before {
+      position: absolute;
+      inset-block-end: 0;
+      inset-inline: 12px;
+      height: 2px;
+      background: Highlight;
+      forced-color-adjust: none;
+      pointer-events: none;
+      content: "";
     }
 
     .app-shell .window-controls .close-window:hover {
