@@ -4034,6 +4034,7 @@
     --reading-surface: #ffffff;
     --surface-muted: #f1f3f6;
     --field-bg: #f0f2f6;
+    --field-focus-bg: #e1e6ee;
     --surface-highlight: rgba(255, 255, 255, 0.7);
     --text: #252830;
     --muted: #353b45;
@@ -4048,7 +4049,7 @@
     --accent-pressed: #2b4192;
     --accent-soft: #ebefff;
     --selected-bg: #ebefff;
-    --toolbar-selected-bg: #e5eaf7;
+    --toolbar-selected-bg: #e1e7f2;
     --selection-bg: #d8e4f6;
     --hover: #e9edf3;
     --pressed: #dde3ec;
@@ -4106,6 +4107,7 @@
     --reading-surface: #1b1d23;
     --surface-muted: #252932;
     --field-bg: #2f3340;
+    --field-focus-bg: #404653;
     --surface-highlight: rgba(255, 255, 255, 0.04);
     --text: #e6e8ee;
     --muted: #adb3c0;
@@ -4120,7 +4122,7 @@
     --accent-pressed: #94a7f1;
     --accent-soft: #303a59;
     --selected-bg: #303a59;
-    --toolbar-selected-bg: #2b3347;
+    --toolbar-selected-bg: #343c52;
     --selection-bg: #364862;
     --hover: #30343e;
     --pressed: #3a404d;
@@ -4338,7 +4340,6 @@
     --button-pressed-bg: var(--selected-bg);
     color: var(--accent);
     background: var(--selected-bg);
-    box-shadow: inset 2px 0 var(--accent);
     font-weight: 600;
   }
 
@@ -5088,14 +5089,11 @@
   }
 
   .menu-trigger[aria-expanded="true"],
-  .titlebar-action[aria-pressed="true"] {
+  .titlebar-action[aria-pressed="true"],
+  .tool-button:is([aria-pressed="true"], [aria-expanded="true"]):not(:disabled) {
     --button-pressed-bg: var(--toolbar-selected-bg);
     color: var(--accent);
     background: var(--toolbar-selected-bg);
-  }
-
-  .tool-button:is([aria-pressed="true"], [aria-expanded="true"]):not(:disabled) {
-    color: var(--accent);
   }
 
   .menu-trigger,
@@ -5133,21 +5131,6 @@
     padding: 0;
   }
 
-  .document-controls .tool-button {
-    position: relative;
-  }
-
-  .document-controls .tool-button:is([aria-pressed="true"], [aria-expanded="true"])::after {
-    position: absolute;
-    bottom: 3px;
-    left: calc(50% - 5px);
-    width: 10px;
-    height: 2px;
-    border-radius: 2px;
-    background: currentColor;
-    content: "";
-  }
-
   .app-shell .settings-nav button:focus-visible,
   .app-shell .settings-segmented button:focus-visible,
   .app-shell .font-size-stepper button:focus-visible,
@@ -5163,7 +5146,8 @@
 
   .app-shell .search-popover :is(.search-step, .search-close):focus-visible {
     outline: 0;
-    box-shadow: inset 0 -2px var(--accent);
+    color: var(--text);
+    background: var(--pressed);
   }
 
   .tool-button:disabled {
@@ -5193,7 +5177,7 @@
 
   .dropdown-menu:focus-visible {
     outline: 0;
-    box-shadow: var(--shadow-popover), inset 0 2px var(--accent);
+    background: var(--field-bg);
   }
 
   .search-popover {
@@ -5363,7 +5347,7 @@
 
   .app-shell .dropdown-menu button:focus-visible:not(:disabled) {
     outline: 0;
-    box-shadow: inset 2px 0 var(--accent);
+    background: var(--pressed);
   }
 
   .dropdown-menu button {
@@ -5382,8 +5366,7 @@
     cursor: pointer;
   }
 
-  .dropdown-menu button:hover:not(:disabled),
-  .dropdown-menu button:focus-visible:not(:disabled) {
+  .dropdown-menu button:hover:not(:disabled) {
     background: var(--hover);
   }
 
@@ -5574,14 +5557,14 @@
     height: 38px;
     padding: 0 10px;
     box-sizing: border-box;
-    border-block-end: 2px solid transparent;
     border-radius: var(--radius-control);
     color: var(--muted);
     background: var(--field-bg);
   }
 
   .search-box:focus-within {
-    border-block-end-color: var(--accent);
+    color: var(--text);
+    background: var(--field-focus-bg);
   }
 
   .search-box > :global(svg) {
@@ -5858,19 +5841,9 @@
 
   .outline-item.current {
     --button-pressed-bg: color-mix(in srgb, var(--accent) 18%, var(--sidebar-bg));
-    color: var(--text);
+    color: var(--accent);
     background: color-mix(in srgb, var(--accent) 11%, var(--sidebar-bg));
     font-weight: 600;
-  }
-
-  .outline-item.current::before {
-    position: absolute;
-    inset-block: 6px;
-    inset-inline-start: 3px;
-    width: 2px;
-    border-radius: 2px;
-    background: var(--outline-current-marker, var(--accent));
-    content: "";
   }
 
   .outline-list .outline-item:focus-visible {
@@ -5999,7 +5972,6 @@
 
   .reader-viewport:focus-visible {
     outline: 0;
-    box-shadow: inset 0 2px var(--accent);
   }
 
   .editor-workspace {
@@ -6512,6 +6484,7 @@
       --reading-surface: Canvas;
       --surface-muted: Canvas;
       --field-bg: Field;
+      --field-focus-bg: Field;
       --surface-highlight: Canvas;
       --text: CanvasText;
       --muted: CanvasText;
@@ -6572,11 +6545,11 @@
 
     .app-shell .search-box {
       border: 1px solid ButtonBorder;
-      border-block-end-width: 2px;
     }
 
     .app-shell .search-box:focus-within {
-      border-block-end-color: Highlight;
+      outline: 2px solid Highlight;
+      outline-offset: -2px;
     }
 
     .app-shell .dropdown-menu:focus-visible,
@@ -6596,7 +6569,6 @@
 
     .app-shell .outline-item.current {
       --button-pressed-bg: Highlight;
-      --outline-current-marker: HighlightText;
     }
 
     .app-shell .toolbar :is(.menu-trigger, .titlebar-action, .tool-button):focus-visible {
@@ -7051,7 +7023,6 @@
       border-bottom: 1px solid var(--line);
     }
     .settings-nav button { flex: 0 0 auto; }
-    .settings-nav button.active { box-shadow: inset 0 -2px var(--accent); }
     .settings-panel-content { padding: 24px; }
     .settings-control-row,
     .settings-switch-row,

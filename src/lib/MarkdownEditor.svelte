@@ -1824,18 +1824,17 @@
     padding: 0 9px;
     box-sizing: border-box;
     border: 0;
-    border-block-end: 2px solid transparent;
-    border-radius: var(--radius-control) var(--radius-control) 2px 2px;
+    border-radius: var(--radius-control);
     color: var(--text);
     background: var(--field-bg, var(--surface-muted));
     caret-color: var(--accent);
     font: inherit;
     font-size: 15px;
-    transition: border-color var(--duration-interaction, 100ms) var(--ease-out, ease-out);
+    transition: background-color var(--duration-interaction, 100ms) var(--ease-out, ease-out);
   }
 
   :global(.editor-shell .editor-host .ml-editor-search-input:focus) {
-    border-block-end-color: var(--accent);
+    background: var(--field-focus-bg, var(--pressed));
     outline: none;
   }
 
@@ -1955,11 +1954,12 @@
 
     :global(.editor-shell .editor-host .ml-editor-search-input) {
       border: 1px solid ButtonBorder;
-      border-block-end-width: 2px;
     }
 
     :global(.editor-shell .editor-host .ml-editor-search-input:focus) {
-      border-block-end-color: Highlight;
+      background: Field;
+      outline: 2px solid Highlight;
+      outline-offset: -2px;
     }
 
     .selection-toolbar .selection-heading-trigger[aria-expanded="true"],
@@ -2055,8 +2055,11 @@
   }
 
   :global(.editor-shell .editor-host .cm-selectionMatch) {
+    background-color: var(--hover);
+  }
+
+  :global(.editor-shell .editor-host .cm-searchMatch .cm-selectionMatch) {
     background-color: transparent;
-    box-shadow: inset 0 -1px color-mix(in srgb, var(--accent) 70%, transparent);
   }
 
   :global(.editor-shell .editor-host .cm-searchMatch) {
